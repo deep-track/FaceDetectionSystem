@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ title or "Face Dataset Collector" }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+
+<nav class="bg-white shadow">
+  <div class="max-w-6xl mx-auto px-4 py-3">
+    <div class="flex justify-between items-center">
+      <div class="font-semibold text-lg md:text-xl">Face Dataset Collector</div>
+      
+      <!-- Mobile menu button -->
+      <button id="mobileMenuBtn" class="md:hidden text-gray-600 hover:text-gray-900 focus:outline-none">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+        </svg>
+      </button>
+      
+      <!-- Desktop menu -->
+      <div class="hidden md:flex space-x-4">
+        <a href="/" class="text-blue-600 hover:underline">Record</a>
+        <a href="/docs/recording" class="text-blue-600 hover:underline">Docs</a>
+        <a href="/login" class="text-red-600 hover:underline">Logout</a>
+      </div>
+    </div>
+    
+    <!-- Mobile menu (hidden by default) -->
+    <div id="mobileMenu" class="hidden md:hidden mt-3 space-y-2 pb-2">
+      <a href="/" class="block text-blue-600 hover:underline py-2">Record</a>
+      <a href="/docs/recording" class="block text-blue-600 hover:underline py-2">Docs</a>
+      <a href="/login" class="block text-red-600 hover:underline py-2">Logout</a>
+    </div>
+  </div>
+</nav>
+
+<main class="max-w-3xl mx-auto p-4 sm:p-6">
+  {% block content %}{% endblock %}
+</main>
+
+<script>
+  // Mobile menu toggle
+  const mobileMenuBtn = document.getElementById('mobileMenuBtn');
+  const mobileMenu = document.getElementById('mobileMenu');
+  
+  if (mobileMenuBtn && mobileMenu) {
+    mobileMenuBtn.addEventListener('click', function() {
+      mobileMenu.classList.toggle('hidden');
+    });
+  }
+</script>
+
+</body>
+</html>

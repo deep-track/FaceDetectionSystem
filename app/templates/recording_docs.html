@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="bg-white p-6 rounded shadow prose max-w-none">
+  <h1>Recording Instructions</h1>
+
+  <h2>Purpose</h2>
+  <p>
+    You are helping collect training data for a face authenticity detection system.
+    Consistency matters.
+  </p>
+
+  <h2>Recording Rules</h2>
+  <ul>
+    <li>45 seconds per recording, set automatically, don't worry</li>
+    <li>Front-facing webcam</li>
+    <li>No filters or beauty modes</li>
+    <li>Record as many videos as you can, that is, real and fake videos</li>
+  </ul>
+
+  <h2>REAL Recordings</h2>
+  <ul>
+    <li>You are physically present</li>
+    <li>One face only.</li>
+    <li>Vary the following, lighting, distance from webcam etc to get all sorts of videos for training</li>
+    <li>Blink normally</li>
+    <li>Small head movements are allowed</li>
+  </ul>
+
+  <h2>FAKE Recordings</h2>
+  <ul>
+    <li>Screen playback of a face</li>
+    <li>Printed photo</li>
+    <li>Deepfake playback</li>
+    <li>Get a live deepfake generator, for example https://deeplivecam.net/</li>
+  </ul>
+
+  <h2>Do NOT</h2>
+  <ul>
+    <li>Change lighting mid-recording</li>
+    <li>Wear hats or masks</li>
+    <li>Move the camera</li>
+  </ul>
+</div>
+
+{% endblock %}
