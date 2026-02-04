@@ -6,7 +6,7 @@ from collections import deque
 from mediapipe.tasks.python import vision
 from scripts.utils import extract_cheek_signal, extract_motion_features, extract_phys_features, process_and_store_window, save_recording
 
-model_path = r"data\face_landmarker.task"
+model_path = r"data/face_landmarker.task"
 
 # config
 BaseOptions = mp.tasks.BaseOptions
