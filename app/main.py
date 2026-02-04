@@ -5,12 +5,14 @@ from app.models import StartRecordingRequest, RecordingResponse
 from fastapi import FastAPI, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(
     title="Training app for webcam product",
     version='1.0.0'
 )
 templates = Jinja2Templates(directory="app/templates")
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
