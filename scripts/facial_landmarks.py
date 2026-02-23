@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from scipy.signal import butter, detrend, hilbert, filtfilt
+from scipy import signal as scipy_signal
+from scipy.stats import entropy
 
 logger = logging.getLogger(__name__)
 
@@ -282,108 +284,249 @@ def enhance_frame(frame):
 
     return enhanced
 
-def extract_window_features(signal, fps, window_sec=1.6, step_sec=0.8):
+# ============================================================================
+# FAKECATCHER-STYLE FEATURES (NEW!)
+# ============================================================================
+
+def extract_psd_features(ppg_signal, fps, hr_band=(0.7, 4.0)):
     """
-    extract window-level features per video
-    handles short videos by shortening window size
+    Extract Power Spectral Density features (FakeCatcher style)
+    This is THE key difference!
     """
-    # Get signal lengths
-    signal_lengths = [len(sig) for sig in signal.values()]
+    # Compute PSD using Welch's method
+    try:
+        freqs, psd = scipy_signal.welch(
+            ppg_signal, 
+            fs=fps,
+            nperseg=min(256, len(ppg_signal)),
+            noverlap=None,
+            scaling='density'
+        )
+    except:
+        # Return default values if PSD computation fails
+        return {
+            'dominant_freq_bpm': 0.0,
+            'psd_peak': 0.0,
+            'psd_mean': 0.0,
+            'psd_std': 0.0,
+            'hr_band_ratio': 0.0,
+            'spectral_entropy': 0.0,
+            'snr_db': 0.0,
+            'spectral_flatness': 0.0
+        }
+    
+    # Convert frequency to BPM
+    freqs_bpm = freqs * 60
+    
+    # Heart rate band indices
+    hr_idx = (freqs_bpm >= hr_band[0]*60) & (freqs_bpm <= hr_band[1]*60)
+    
+    features = {}
+    
+    # 1. Dominant frequency in HR band
+    if np.any(hr_idx):
+        hr_psd = psd[hr_idx]
+        hr_freqs = freqs_bpm[hr_idx]
+        features['dominant_freq_bpm'] = hr_freqs[np.argmax(hr_psd)]
+        features['psd_peak'] = np.max(hr_psd)
+        features['psd_mean'] = np.mean(hr_psd)
+        features['psd_std'] = np.std(hr_psd)
+        
+        # 2. Band power ratio (HR band vs total)
+        total_power = np.sum(psd)
+        hr_power = np.sum(hr_psd)
+        features['hr_band_ratio'] = hr_power / (total_power + 1e-10)
+        
+        # 3. Spectral entropy (FakeCatcher uses this!)
+        psd_norm = psd / (np.sum(psd) + 1e-10)
+        features['spectral_entropy'] = entropy(psd_norm)
+        
+        # 4. SNR in HR band
+        noise_idx = ~hr_idx
+        noise_power = np.mean(psd[noise_idx]) if np.any(noise_idx) else 1e-10
+        signal_power = np.max(hr_psd)
+        features['snr_db'] = 10 * np.log10(signal_power / (noise_power + 1e-10))
+        
+        # 5. Spectral flatness (measure of noisiness)
+        geometric_mean = np.exp(np.mean(np.log(psd + 1e-10)))
+        arithmetic_mean = np.mean(psd)
+        features['spectral_flatness'] = geometric_mean / (arithmetic_mean + 1e-10)
+    else:
+        # No valid HR band found
+        for key in ['dominant_freq_bpm', 'psd_peak', 'psd_mean', 'psd_std', 
+                   'hr_band_ratio', 'spectral_entropy', 'snr_db', 'spectral_flatness']:
+            features[key] = 0.0
+    
+    return features
+
+
+def compute_coherence_spectrum(sig1, sig2, fps):
+    """
+    Compute magnitude-squared coherence (FakeCatcher uses this)
+    Better than simple correlation!
+    """
+    try:
+        freqs, coh = scipy_signal.coherence(
+            sig1, sig2,
+            fs=fps,
+            nperseg=min(256, len(sig1))
+        )
+        
+        # Focus on HR band
+        hr_idx = (freqs >= 0.7) & (freqs <= 4.0)
+        
+        return {
+            'coherence_mean': np.mean(coh[hr_idx]) if np.any(hr_idx) else 0.0,
+            'coherence_max': np.max(coh[hr_idx]) if np.any(hr_idx) else 0.0,
+            'coherence_std': np.std(coh[hr_idx]) if np.any(hr_idx) else 0.0
+        }
+    except:
+        return {'coherence_mean': 0.0, 'coherence_max': 0.0, 'coherence_std': 0.0}
+
+
+def extract_window_features_enhanced(signals, fps, window_sec=2.0, step_sec=1.0):
+    """
+    ENHANCED version with FakeCatcher-style features
+    This replaces extract_window_features
+    """
+    signal_lengths = [len(sig) for sig in signals.values()]
     min_signal_length = min(signal_lengths) if signal_lengths else 0
     
-    if min_signal_length < 10:
-        logger.warning(f"Signal too short ({min_signal_length} frames) for window extraction")
+    if min_signal_length < 30:  # Need at least 1 second at 30fps
+        logger.warning(f"Signal too short ({min_signal_length} frames)")
         return []
     
-    # Adjust window size for short videos
-    WINDOW_SEC = 1.6
-    STEP_SEC = 0.8
+    WIN = int(window_sec * fps)
+    STEP = int(step_sec * fps)
     
-    WIN = int(WINDOW_SEC * fps)
-    STEP = int(STEP_SEC * fps)
-    
-    # If signal is shorter than window, use smaller window
+    # Adjust for short videos
     if min_signal_length < WIN:
-        WIN = max(10, min_signal_length // 2)  # Use half the signal or minimum 10 frames
-        STEP = max(5, WIN // 2)  # Step is half the window
+        WIN = max(30, min_signal_length // 2)
+        STEP = max(15, WIN // 2)
         logger.warning(f"Adjusted window size to {WIN} frames for short video")
     
     window_features = []
-
-    # choose reference signals
-    left = signal["left_cheek"]
-    right = signal["right_cheek"]
-    forehead = signal["forehead"]
-
+    
+    left = signals["left_cheek"]
+    right = signals["right_cheek"]
+    forehead = signals["forehead"]
+    
     for start in range(0, len(left) - WIN + 1, STEP):
         end = start + WIN
-
-        l = left[start:end]
-        r = right[start:end]
-        f = forehead[start:end]
-
-        # skip degenerate windows
-        if np.std(l) == 0 or np.std(r) == 0 or np.std(f) == 0:
+        
+        l_win = left[start:end]
+        r_win = right[start:end]
+        f_win = forehead[start:end]
+        
+        # Skip bad windows
+        if np.std(l_win) == 0 or np.std(r_win) == 0 or np.std(f_win) == 0:
             continue
-
-        # calculate heart rate
-        hr = calc_heart_rate(l, fps)
-
-        # calc correlation
-        corr_lr = np.corrcoef(l, r)[0, 1] if len(l) > 1 else 0.0
-        corr_lf = np.corrcoef(l, f)[0, 1] if len(l) > 1 else 0.0
-
-        # phase coherence
+        
+        feat = {}
+        
+        # === 1. PSD FEATURES (FakeCatcher's main contribution!) ===
+        psd_left = extract_psd_features(l_win, fps)
+        psd_right = extract_psd_features(r_win, fps)
+        psd_forehead = extract_psd_features(f_win, fps)
+        
+        # Add PSD features with region prefix
+        for region, psd_feat in [('left', psd_left), ('right', psd_right), ('forehead', psd_forehead)]:
+            for key, val in psd_feat.items():
+                feat[f'{region}_{key}'] = val
+        
+        # === 2. COHERENCE SPECTRUM (better than simple correlation) ===
+        coh_lr = compute_coherence_spectrum(l_win, r_win, fps)
+        coh_lf = compute_coherence_spectrum(l_win, f_win, fps)
+        
+        for key, val in coh_lr.items():
+            feat[f'lr_{key}'] = val
+        for key, val in coh_lf.items():
+            feat[f'lf_{key}'] = val
+        
+        # === 3. Keep existing features (still useful) ===
+        # Heart rate from dominant frequency
+        feat['hr_left'] = psd_left['dominant_freq_bpm']
+        feat['hr_right'] = psd_right['dominant_freq_bpm']
+        feat['hr_forehead'] = psd_forehead['dominant_freq_bpm']
+        feat['hr_consistency'] = np.std([
+            psd_left['dominant_freq_bpm'],
+            psd_right['dominant_freq_bpm'],
+            psd_forehead['dominant_freq_bpm']
+        ])
+        
+        # Simple correlation (keep as backup feature)
+        feat['corr_lr'] = np.corrcoef(l_win, r_win)[0, 1]
+        feat['corr_lf'] = np.corrcoef(l_win, f_win)[0, 1]
+        
+        # Phase coherence (keep this, it's good!)
         try:
-            plv_lr = np.abs(np.mean(np.exp(1j * (extract_phase(l) - extract_phase(r)))))
-            plv_lf = np.abs(np.mean(np.exp(1j * (extract_phase(l) - extract_phase(f)))))
+            feat['plv_lr'] = np.abs(np.mean(np.exp(1j * (extract_phase(l_win) - extract_phase(r_win)))))
+            feat['plv_lf'] = np.abs(np.mean(np.exp(1j * (extract_phase(l_win) - extract_phase(f_win)))))
         except:
-            plv_lr = 0.0
-            plv_lf = 0.0
-
-        # stability
-        std_l = np.std(l)
-        std_r = np.std(r)
-        std_f = np.std(f)
-
-        window_features.append({
-            "hr": hr,
-            "corr_lr": corr_lr,
-            "corr_lf": corr_lf,
-            "plv_lr": plv_lr,
-            "plv_lf": plv_lf,
-            "std_left": std_l,
-            "std_right": std_r,
-            "std_forehead": std_f
-        })
+            feat['plv_lr'] = 0.0
+            feat['plv_lf'] = 0.0
+        
+        # Regional stability
+        feat['std_left'] = np.std(l_win)
+        feat['std_right'] = np.std(r_win)
+        feat['std_forehead'] = np.std(f_win)
+        
+        # === 4. QUALITY-BASED FILTERING ===
+        # Only keep windows with good SNR (FakeCatcher does this!)
+        avg_snr = np.mean([psd_left['snr_db'], psd_right['snr_db'], psd_forehead['snr_db']])
+        if avg_snr > 0:  # Only keep windows with positive SNR
+            window_features.append(feat)
     
     # If no windows were extracted, create at least one from the entire signal
-    if len(window_features) == 0 and len(left) >= 5:
+    if len(window_features) == 0 and len(left) >= 30:
         logger.warning("No windows extracted, using entire signal as single window")
         try:
-            hr = calc_heart_rate(left, fps)
-            corr_lr = np.corrcoef(left, right)[0, 1] if len(left) > 1 else 0.0
-            corr_lf = np.corrcoef(left, forehead)[0, 1] if len(left) > 1 else 0.0
+            feat = {}
             
-            window_features.append({
-                "hr": hr if hr is not None else 0.0,
-                "corr_lr": corr_lr,
-                "corr_lf": corr_lf,
-                "plv_lr": 0.0,
-                "plv_lf": 0.0,
-                "std_left": np.std(left),
-                "std_right": np.std(right),
-                "std_forehead": np.std(forehead)
-            })
+            # PSD features
+            psd_left = extract_psd_features(left, fps)
+            psd_right = extract_psd_features(right, fps)
+            psd_forehead = extract_psd_features(forehead, fps)
+            
+            for region, psd_feat in [('left', psd_left), ('right', psd_right), ('forehead', psd_forehead)]:
+                for key, val in psd_feat.items():
+                    feat[f'{region}_{key}'] = val
+            
+            # Coherence
+            coh_lr = compute_coherence_spectrum(left, right, fps)
+            coh_lf = compute_coherence_spectrum(left, forehead, fps)
+            
+            for key, val in coh_lr.items():
+                feat[f'lr_{key}'] = val
+            for key, val in coh_lf.items():
+                feat[f'lf_{key}'] = val
+            
+            # Other features
+            feat['hr_left'] = psd_left['dominant_freq_bpm']
+            feat['hr_right'] = psd_right['dominant_freq_bpm']
+            feat['hr_forehead'] = psd_forehead['dominant_freq_bpm']
+            feat['hr_consistency'] = np.std([psd_left['dominant_freq_bpm'], 
+                                            psd_right['dominant_freq_bpm'], 
+                                            psd_forehead['dominant_freq_bpm']])
+            feat['corr_lr'] = np.corrcoef(left, right)[0, 1]
+            feat['corr_lf'] = np.corrcoef(left, forehead)[0, 1]
+            feat['plv_lr'] = 0.0
+            feat['plv_lf'] = 0.0
+            feat['std_left'] = np.std(left)
+            feat['std_right'] = np.std(right)
+            feat['std_forehead'] = np.std(forehead)
+            
+            window_features.append(feat)
         except Exception as e:
             logger.error(f"Failed to create fallback window: {e}")
-
+    
     return window_features
 
-def aggregate_features(metadata, window_features, video_name):
+
+def aggregate_features_enhanced(metadata, window_features, video_name):
     """
-    aggregate window-level features into video features for ml prediction
-    Handles cases with no window features by using default values
+    Enhanced aggregation with PSD features
+    This replaces aggregate_features
     """
     video_features = {
         "video_name": video_name,
@@ -393,69 +536,40 @@ def aggregate_features(metadata, window_features, video_name):
     if len(window_features) == 0:
         logger.warning(f"No window features for {video_name}. Using default values.")
         # Add default features for videos that couldn't be processed
-        default_cols = ["hr", "corr_lr", "corr_lf", "plv_lr", "plv_lf", 
-                       "std_left", "std_right", "std_forehead"]
-        for col in default_cols:
-            video_features[f"{col}_mean"] = 0.0
-            video_features[f"{col}_std"] = 0.0
-            video_features[f"{col}_min"] = 0.0
-            video_features[f"{col}_max"] = 0.0
-            video_features[f"{col}_median"] = 0.0
-        
-        # ADD THIS: Mark as no face detected
         video_features['face_detected'] = 0
         video_features['num_windows'] = 0
-        
         return video_features
     
     df = pd.DataFrame(window_features)
-
-    video_features = {
-        "video_name": video_name,
-        "label": 1 if metadata[video_name]["label"] == "REAL" else 0
-    }
-
-    # heart rate features
-    hr_mean, hr_std = safe_stats(df["hr"].dropna())
-    video_features["hr_mean"] = hr_mean
-    video_features["hr_std"] = hr_std
-    video_features["hr_cv"] = hr_std / (hr_mean + 1e-6)
-
-    # cross region stability
-    for r in ["left", "right", "forehead"]:
-        m, s = safe_stats(df[f"std_{r}"].dropna())
-        video_features[f"std_{r}_mean"] = m
-        video_features[f"std_{r}_std"] = s
-        video_features[f"std_{r}_cv"] = s / (m + 1e-6)
-
-    # coherence features
-    for k in ["corr_lr", "corr_lf", "plv_lr", "plv_lf"]:
-        m, s = safe_stats(df[k].dropna())
-        video_features[f"{k}_mean"] = m
-        video_features[f"{k}_std"] = s
-
-    # add asymmetry 
-    video_features["std_lr_diff"] = abs(
-        video_features["std_left_mean"] - video_features["std_right_mean"]
-    )
-
-    video_features["corr_diff"] = abs(
-        video_features["corr_lr_mean"] - video_features["corr_lf_mean"]
-    )
-
-    video_features["plv_diff"] = abs(
-        video_features["plv_lr_mean"] - video_features["plv_lf_mean"]
-    )
-
-    # check windows extracted and if face was detected
+    
+    # Aggregate all numerical features
+    for col in df.columns:
+        if df[col].dtype in [np.float64, np.float32, np.int64, np.int32]:
+            values = df[col].dropna()
+            if len(values) > 0:
+                video_features[f"{col}_mean"] = np.mean(values)
+                video_features[f"{col}_std"] = np.std(values)
+                video_features[f"{col}_min"] = np.min(values)
+                video_features[f"{col}_max"] = np.max(values)
+                video_features[f"{col}_median"] = np.median(values)
+            else:
+                video_features[f"{col}_mean"] = 0.0
+                video_features[f"{col}_std"] = 0.0
+                video_features[f"{col}_min"] = 0.0
+                video_features[f"{col}_max"] = 0.0
+                video_features[f"{col}_median"] = 0.0
+    
+    # Add meta features
     video_features["num_windows"] = len(df)
     video_features["face_detected"] = 1
-
+    
     return video_features
 
-
 def process_video(metadata, video_path, video_name, output_path=None, annotate=True):
-    """process a video to compute HR from face regions and optionally save annotated video."""
+    """
+    process a video to compute HR from face regions and optionally save annotated video.
+    if annotate = False, annotated video won't be shown or saved
+    """
     
     video_options = FaceLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
@@ -586,6 +700,7 @@ def process_video(metadata, video_path, video_name, output_path=None, annotate=T
     face_detection_rate = frames_with_face / total_frames if total_frames > 0 else 0
 
     logger.info(f"{video_name}: {frames_with_face}/{total_frames} frames with face ({face_detection_rate:.1%})")
+    
     # process signals per region
     filtered_signals = {}
     for name, sig in signals.items():
@@ -600,19 +715,18 @@ def process_video(metadata, video_path, video_name, output_path=None, annotate=T
         green = bandpass_filter(green, fps)  # now handle short signals
         filtered_signals[name] = green
 
-    # always try to extract features, even if limited
-    window_features = extract_window_features(filtered_signals, fps) if len(filtered_signals) >= 2 else []
+    # CHANGED: Use enhanced window extraction
+    window_features = extract_window_features_enhanced(filtered_signals, fps) if len(filtered_signals) >= 2 else []
     print(f"Extracted {len(window_features)} window-level feature vectors from video")
 
-    # always aggregate to video-level features
-    video_features = aggregate_features(metadata, window_features, video_name)
+    # CHANGED: Use enhanced aggregation
+    video_features = aggregate_features_enhanced(metadata, window_features, video_name)
     video_features['total_frames'] = frame_idx
     video_features['frames_with_face'] = frames_with_face
     video_features['face_detection_rate'] = face_detection_rate
     print("Video features have been extracted")
     
-    for k, v in video_features.items():
-        print(f"{k}: {v}")
+    print(f"Number of features extracted: {len(video_features)}")
 
     # skip detailed metrics for very short videos
     if len(filtered_signals) < 2:
@@ -641,14 +755,6 @@ def process_video(metadata, video_path, video_name, output_path=None, annotate=T
         CORR_WINDOW,
         CORR_STEP
     )
-
-    """
-    print(f"Region correlation, left-right: {region_corr['lr']} \n" 
-        f"Region correlation, left-forehead: {region_corr['lf']}")
-    
-    print(f"Mean for left cheek signal: {np.mean(filtered_signals['left_cheek'])} \n",
-          f"Mean for right cheek signal: {np.mean(filtered_signals['right_cheek'])}")
-    """
     
     # calc phase coherence
     region_phase = {}
@@ -666,11 +772,6 @@ def process_video(metadata, video_path, video_name, output_path=None, annotate=T
         WINDOW_SIZE,
         STEP_SIZE
     )
-
-    """
-    print("Phase coherence LR:", region_phase["lr"])
-    print("Phase coherence LF:", region_phase["lf"])
-    """
 
     # calc heart region per face region, and their quality
     hr_per_region = {}
@@ -701,26 +802,9 @@ def process_video(metadata, video_path, video_name, output_path=None, annotate=T
                 for k, v in quality_per_region[region][i].items():
                     row[f"{region}_{k}"] = v
         all_quality.append(row)
-    #df_quality = pd.DataFrame(all_quality)
-    #df_quality.to_csv('data/heart_rate_quality.csv', index=False)
-    print("Saved heart rate signal quality metrics to data/hr_quality.csv")
 
-    # plot raw vs smoothed hr
-    """
-        if len(avg_hr) > 0:
-        plt.figure(figsize=(10,4))
-        plt.plot(avg_hr, label="Raw HR", marker='o')
-        plt.plot(range(len(smooth_avg_hr)), smooth_avg_hr, label="Smoothed HR", linewidth=2, marker='x')
-        plt.xlabel("Window index")
-        plt.ylabel("Heart Rate (bpm)")
-        plt.title("Average HR across face regions")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-        print(f"Estimated average HR: {np.mean(avg_hr):.2f} bpm")
-    else:
-        print("No HR could be estimated")
-    """
+    print("Saved heart rate signal quality metrics")
+
     return avg_hr, smooth_avg_hr, video_features
 
 if __name__ == "__main__":
@@ -775,9 +859,10 @@ if __name__ == "__main__":
         df = pd.DataFrame(all_video_features)
         # fill nan values with 0
         df = df.fillna(0)
-        df.to_csv("data/video_features_enhanced.csv", index=False)
+        df.to_csv("data/video_features.csv", index=False)
+        print(f"\n{'='*60}")
         print(f"Saved {len(all_video_features)} video-level features")
-        print(f" File: data/video_features_enhanced.csv")
+        print(f"File: data/video_features.csv")
         print(f"{'='*60}")
     else:
         print("\nNo videos were successfully processed")
