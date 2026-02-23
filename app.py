@@ -448,7 +448,8 @@ async def demo_ui():
     const stream = await navigator.mediaDevices.getUserMedia({ video: true });
     document.getElementById('video').srcObject = stream;
 
-    ws = new WebSocket('ws://' + location.host + '/ws/predict');
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(wsProtocol + '//' + location.host + '/ws/predict');
 
     ws.onmessage = (e) => {
       const d = JSON.parse(e.data);
