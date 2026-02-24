@@ -1,7 +1,7 @@
 # FaceDetectionSystem
-A face detection system built with Python, opencv, mediapipe, scipy, numpy, to detect and extract rPPG signals from various face regions e.g. left cheek, right cheek, forehead
+A face detection system built with Python, opencv, mediapipe, scipy, numpy, to extract rPPG signals from various face regions e.g. left cheek, right cheek, forehead and detect real / fake content from live video footage
 
-Make sure to download the FaceForensics dataset from Google or this [URL](https://www.kaggle.com/datasets/xdxd003/ff-c23)
+Make sure to download the FaceForensics dataset from Google or on [Kaggle](https://www.kaggle.com/datasets/xdxd003/ff-c23)
 
 ## Setup Instructions
 ### 1. Clone this repo
