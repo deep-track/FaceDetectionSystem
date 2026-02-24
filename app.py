@@ -398,7 +398,7 @@ async def demo_ui():
   <video id="video" width="480" height="360" autoplay muted></video>
   <canvas id="canvas" width="480" height="360" style="display:none"></canvas>
   <div id="status">Press Start to begin</div>
-  <div id="status">Please give the system 2-10s to boot up</div>
+  <div id="status">Please give the system 2s to boot up</div>
   <div id="bar-wrap"><div id="bar"></div></div>
   <div id="log"></div>
 
