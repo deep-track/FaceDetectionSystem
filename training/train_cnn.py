@@ -1,9 +1,6 @@
-import os
-import pickle
 import argparse
 import numpy as np
 import tensorflow as tf
-
 from collections import defaultdict
 from tensorflow import keras
 from tensorflow.keras import layers
@@ -14,11 +11,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-
+# load data
 def load_maps(npz_path):
-    """
-    Load data from data/ppg_maps.npz
-    """
     data  = np.load(npz_path, allow_pickle=True)
     X     = data['X'].astype(np.float32)    # (N, omega, 64, 1)
     y     = data['y'].astype(np.int32)
@@ -34,9 +28,9 @@ def load_maps(npz_path):
         X = X / 255.0
     return X, y, names
 
+# cnn architecture
 def build_cnn(input_shape):
     """
-    CNN Architecture
     Three convolutional blocks with BatchNormalization.
     GlobalAveragePooling2D to keep parameter count low (~130K).
     LR=3e-4: middle ground between 1e-4 (too slow) and 1e-3 (too fast).
@@ -77,17 +71,15 @@ def build_cnn(input_shape):
     ], name='FakeCatcher_CNN')
 
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=3e-4),
+        optimizer=keras.optimizers.Adam(learning_rate=3e-4),  # between 1e-4 and 1e-3
         loss='binary_crossentropy',
         metrics=['accuracy', keras.metrics.AUC(name='auc')]
     )
     return model
 
+# video level aggregation
 def video_level_predictions(probs, y_seg, names):
-    """
-    Video leve; aggregation across features
-    Average P(fake) across all segments of a video; threshold at 0.5.
-    """
+    """Average P(fake) across all segments of a video; threshold at 0.5."""
     vid_probs  = defaultdict(list)
     vid_labels = {}
 
@@ -105,9 +97,6 @@ def video_level_predictions(probs, y_seg, names):
     return np.array(v_preds), np.array(v_labels), np.array(v_names)
 
 def evaluate(model, X_test, y_test, names_test, label="Test"):
-    """
-    evaluate model performance
-    """
     probs = model.predict(X_test, verbose=0).flatten()
     preds = (probs >= 0.5).astype(int)
 
@@ -132,10 +121,8 @@ def evaluate(model, X_test, y_test, names_test, label="Test"):
                                 target_names=['Real', 'Fake'], digits=4))
     return seg_acc, vid_acc
 
+# plot training curve history
 def plot_history(history, save_path='training_history.png'):
-    """
-    plot training results -> training_history.png
-    """
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
     for ax, metric, title in zip(
@@ -173,10 +160,10 @@ def main():
     print(f"  maps={args.maps} | epochs={args.epochs} | batch={args.batch}")
     print(f"{'='*55}\n")
 
-    # load maps
+    # load
     X, y, names = load_maps(args.maps)
 
-    # train / Test split, using 60/40 used in paper
+    # train-test split, 60/40 as stipulated in the paper
     X_train, X_test, y_train, y_test, n_train, n_test = train_test_split(
         X, y, names,
         test_size=args.test_split,
@@ -192,13 +179,18 @@ def main():
     model.summary()
 
     # callbacks
+    # IMPORTANT: all three callbacks monitor val_loss so they agree on what "best" means.
+    # Previously ModelCheckpoint monitored val_accuracy while EarlyStopping monitored
+    # val_loss — they saved different epochs. val_accuracy can be misleadingly high
+    # early on (model predicts everything REAL, gets ~50% accuracy from majority class)
+    # while val_loss correctly shows the model hasn't learned anything useful yet.
     callbacks = [
         keras.callbacks.EarlyStopping(monitor='val_loss', patience=7,
                                       restore_best_weights=True, verbose=1),
         keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5,
                                           patience=2, verbose=1, min_lr=1e-6),
-        keras.callbacks.ModelCheckpoint(args.output, monitor='val_accuracy',
-                                        save_best_only=True, verbose=1),
+        keras.callbacks.ModelCheckpoint(args.output, monitor='val_loss',
+                                        save_best_only=True, mode='min', verbose=1),
     ]
 
     # class weights (handle class imbalance like Celeb-DF)
