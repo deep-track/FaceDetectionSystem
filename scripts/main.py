@@ -1,25 +1,3 @@
-"""
-FakeCatcher - Combined Extraction (SVM Features + PPG Maps)
-============================================================
-Reads each video ONCE and simultaneously produces:
-  - features_svm.npz   →  126-dim feature vectors for SVM training
-  - ppg_maps.npz       →  omega×64 spectral PPG maps for CNN training
-
-This is ~2x faster than running scripts 1 and 2 separately because
-the bottleneck (video reading + MediaPipe face detection) is only done once.
-
-Usage:
-    python extract_all.py \
-        --real_dir      "C:/path/to/original" \
-        --fake_dir      "C:/path/to/Deepfakes" \
-        --out_features  data/features_svm.npz \
-        --out_maps      data/ppg_maps.npz \
-        --omega         128 \
-        --n_subregions  32 \
-        --model         data/face_landmarker.task \
-        --limit         300
-"""
-
 import os
 import argparse
 import numpy as np
@@ -142,7 +120,7 @@ def extract_video(video_path, omega, n_subregions, model_path):
 
     lm_map_indices = MID_FACE_32[:n_subregions]
 
-    # ── SVM buffers: R, G, B per ROI per frame
+    # SVM buffers: R, G, B per ROI per frame
     svm_raw = {
         'RL': [], 'RM': [], 'RR': [],
         'GL': [], 'GM': [], 'GR': [],
@@ -187,7 +165,7 @@ def extract_video(video_path, omega, n_subregions, model_path):
                     svm_raw['G' + tag].append(np.mean(pixels[:, 1]))
                     svm_raw['B' + tag].append(np.mean(pixels[:, 0]))
 
-            # ── PPG map sub-region patches
+            # ppg map sub-region patches
             for i, lm_idx in enumerate(lm_map_indices):
                 rgb = sample_patch(frame_bgr, landmarks, lm_idx, h, w)
                 if rgb is None:
@@ -209,12 +187,12 @@ def extract_video(video_path, omega, n_subregions, model_path):
             end = start + omega
             seg = {}
 
-            # Green-channel PPG
+            # green channel ppg
             for tag in ('L', 'M', 'R'):
                 arr        = np.array(svm_raw['G' + tag][start:end], dtype=np.float64)
                 seg['G' + tag] = butterworth_filter(arr).astype(np.float32)
 
-            # Chrominance PPG (alpha computed per segment)
+            # chrominance ppg (alpha computed per segment)
             for tag, c_key in [('L', 'CL'), ('M', 'CM'), ('R', 'CR')]:
                 R_arr = np.array(svm_raw['R' + tag][start:end], dtype=np.float64)
                 G_arr = np.array(svm_raw['G' + tag][start:end], dtype=np.float64)
@@ -342,7 +320,7 @@ def process_directory(video_dir, label, omega, n_subregions, model_path, limit):
         try:
             svm_segs, map_segs = extract_video(path, omega, n_subregions, model_path)
 
-            # ── SVM features
+            # SVM features
             for seg in svm_segs:
                 fv = build_feature_vector(seg)
                 if np.isfinite(fv).all():
@@ -350,7 +328,7 @@ def process_directory(video_dir, label, omega, n_subregions, model_path, limit):
                     svm_y.append(label)
                     svm_names.append(fname)
 
-            # ── PPG maps
+            # PPG maps
             for m in map_segs:
                 map_X.append(m)
                 map_y.append(label)
@@ -403,33 +381,33 @@ def main():
     print(f"  limit        : {args.limit or 'all'} videos per class")
     print(f"{'='*60}\n")
 
-    # ── Process real videos
+    # process real videos
     (svm_Xr, svm_yr, svm_nr), (map_Xr, map_yr, map_nr) = process_directory(
         args.real_dir, label=0,
         omega=args.omega, n_subregions=args.n_subregions,
         model_path=args.model, limit=args.limit
     )
 
-    # ── Process fake videos
+    # process fake videos
     (svm_Xf, svm_yf, svm_nf), (map_Xf, map_yf, map_nf) = process_directory(
         args.fake_dir, label=1,
         omega=args.omega, n_subregions=args.n_subregions,
         model_path=args.model, limit=args.limit
     )
 
-    # ── Save SVM features
+    # save SVM features
     svm_X = np.array(svm_Xr + svm_Xf, dtype=np.float32)
     svm_y = np.array(svm_yr + svm_yf, dtype=np.int32)
     svm_n = np.array(svm_nr + svm_nf)
     np.savez(args.out_features, X=svm_X, y=svm_y, video_names=svm_n)
 
-    # ── Save PPG maps  → (N, omega, 64, 1) normalised [0,1]
+    # save PPG maps 
     map_X = np.array(map_Xr + map_Xf, dtype=np.float32)[..., np.newaxis] / 255.0
     map_y = np.array(map_yr + map_yf, dtype=np.int32)
     map_n = np.array(map_nr + map_nf)
     np.savez(args.out_maps, X=map_X, y=map_y, video_names=map_n)
 
-    # ── Summary
+    # summary
     print(f"\n{'='*60}")
     print("  Extraction complete — both outputs saved")
     print(f"\n  SVM features → {args.out_features}")
@@ -444,7 +422,6 @@ def main():
     if len(map_X):
         print(f"    Map shape    : {map_X.shape[1:]}")
     print(f"{'='*60}")
-
 
 if __name__ == '__main__':
     main()
