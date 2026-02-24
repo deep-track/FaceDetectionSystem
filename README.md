@@ -55,3 +55,8 @@ uvicorn app:app --reload --port 8000
 ```
 
 And the application will be live at `http://localhost:8000`
+
+## Uploading videos
+Upload fake/real videos for analysis whenbooting up the live server, since recording deepfake videos and showing them directly to the webcam might be a lot of work to do.
+
+`VIDEO_MODE` is used when uploading videos for processing, while `IMAGE_MODE` is used for webcam streaming for per-frame analysis.
