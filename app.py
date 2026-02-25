@@ -1,6 +1,8 @@
 import os
 import cv2
 import sys
+import time
+import uuid
 import base64
 import asyncio
 import logging
@@ -8,6 +10,7 @@ import tempfile
 import numpy as np
 import mediapipe as mp
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse
@@ -20,16 +23,19 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# app config
+# config
 CNN_MODEL_PATH  = "data/cnn_model.keras"
 LANDMARKER_PATH = "data/face_landmarker.task"
 OMEGA           = 128
 N_SUBREGIONS    = 32
 FS              = 30
 LOW_HZ, HIGH_HZ = 0.7, 14.0
-THRESHOLD_FAKE      = float(os.getenv('FAKE_THRESHOLD',      '0.65'))  # prob >= this → FAKE
-THRESHOLD_UNCERTAIN = float(os.getenv('UNCERTAIN_THRESHOLD', '0.40'))  # prob >= this → UNCERTAIN, below → REAL
-SMOOTHING_WINDOW    = int(os.getenv('SMOOTHING_WINDOW',      '3'))     # segments to average on webcam
+THRESHOLD_FAKE      = 0.65
+THRESHOLD_UNCERTAIN = 0.45
+SMOOTHING_WINDOW    = 3    # segments to average on webcam
+MAX_UPLOAD_MB       = 50   # reject files larger than 50mb
+MAX_VIDEO_WORKERS   = 4    # concurrent video jobs
+JOB_TTL_SECONDS     = 7200 # keep jobs for 2 hours
 
 MID_FACE_32 = [
     1, 4, 5, 6, 8, 9, 10, 151,
@@ -38,6 +44,13 @@ MID_FACE_32 = [
     351, 399, 175, 152, 377, 400,
     378, 379, 365, 397
 ]
+
+# in-memory job store for async video processing
+jobs: dict = {}
+
+# bounded thread pool, limits concurrent video jobs to max workers
+video_executor = ThreadPoolExecutor(max_workers=MAX_VIDEO_WORKERS,
+                                    thread_name_prefix='fakecatcher-video')
 
 class FrameRequest(BaseModel):
     image: str   # base64-encoded JPEG
@@ -90,9 +103,9 @@ def signal_quality(R_bufs, G_bufs, B_bufs):
         zero_pct = (R_arr == 0).mean()
         zero_counts.append(zero_pct)
         if zero_pct < 0.6:
-            sig       = butterworth_filter(chrom_ppg_segment(R_arr,
-                            np.array(G_bufs[i], dtype=np.float64),
-                            np.array(B_bufs[i], dtype=np.float64)))
+            sig = butterworth_filter(chrom_ppg_segment(R_arr,
+                      np.array(G_bufs[i], dtype=np.float64),
+                      np.array(B_bufs[i], dtype=np.float64)))
             snr = np.mean(sig ** 2) / (np.std(np.diff(sig)) ** 2 + 1e-9)
             snrs.append(snr)
 
@@ -114,7 +127,6 @@ def classify_prob(prob: float) -> tuple:
         return 'UNCERTAIN', round((1.0 - abs(prob - 0.5) * 2) * 100, 1)
     else:
         return 'REAL', round((1.0 - prob) * 100, 1)
-
 
 def sample_patch(frame_bgr, landmarks, lm_idx, h, w, patch_px=8):
     lm = landmarks[lm_idx]
@@ -139,8 +151,8 @@ class FrameBuffer:
         self.B = [deque(maxlen=OMEGA) for _ in range(N_SUBREGIONS)]
         self.frame_count  = 0
         self.last_result  = None
-        self.step         = OMEGA // 2                              # predict every 64 frames
-        self.prob_history = deque(maxlen=SMOOTHING_WINDOW)         # rolling window of recent probs
+        self.step         = OMEGA // 2                      # predict every 64 frames
+        self.prob_history = deque(maxlen=SMOOTHING_WINDOW)  # rolling window of recent probs
 
     def push(self, rgb_values: list):
         """
@@ -189,7 +201,7 @@ class Predictor:
         logger.info("Loading MediaPipe FaceLandmarker...")
         base_opts = mp_python.BaseOptions(model_asset_path=LANDMARKER_PATH)
 
-        # IMAGE mode — for webcam (stateless, no timestamp needed per frame)
+        # image mode for webcam
         image_opts = mp_vision.FaceLandmarkerOptions(
             base_options=base_opts,
             running_mode=mp_vision.RunningMode.IMAGE,
@@ -197,9 +209,9 @@ class Predictor:
             min_face_detection_confidence=0.4,
             min_face_presence_confidence=0.4,
         )
-        self.landmarker     = mp_vision.FaceLandmarker.create_from_options(image_opts)
-        self.lm_indices     = MID_FACE_32[:N_SUBREGIONS]
-        self.landmarker_path = LANDMARKER_PATH   # stored for per-request VIDEO mode instances
+        self.landmarker      = mp_vision.FaceLandmarker.create_from_options(image_opts)
+        self.lm_indices      = MID_FACE_32[:N_SUBREGIONS]
+        self.landmarker_path = LANDMARKER_PATH  # stored for per-request VIDEO mode instances
         logger.info("FaceLandmarker loaded.")
 
     def extract_frame_rgb(self, frame_bgr):
@@ -227,15 +239,15 @@ class Predictor:
                     snr: float = 1.0) -> dict:
         """Run CNN on a (1, 128, 64, 1) PPG map. Returns prediction dict."""
         if not quality_ok:
-            # signal too noisy to make a reliable call — return UNCERTAIN instead of guessing
+            # signal too noisy to make a reliable call, return UNCERTAIN instead of guessing
             return {
                 'label':      'UNCERTAIN',
                 'confidence': 0.0,
                 'fake_prob':  None,
                 'warning':    quality_reason,
             }
-        prob          = float(self.model.predict(ppg_map, verbose=0)[0][0])
-        label, conf   = classify_prob(prob)
+        prob        = float(self.model.predict(ppg_map, verbose=0)[0][0])
+        label, conf = classify_prob(prob)
         return {
             'label':      label,
             'confidence': conf,
@@ -342,7 +354,7 @@ class Predictor:
             })
 
         # video-level verdict: average prob across all segments
-        avg_prob        = float(np.mean(probs))
+        avg_prob          = float(np.mean(probs))
         label, confidence = classify_prob(avg_prob)
 
         return {
@@ -380,6 +392,7 @@ async def lifespan(app: FastAPI):
     yield  # server runs here
 
     # shutdown
+    video_executor.shutdown(wait=False)
     if predictor:
         predictor.close()
 
@@ -391,17 +404,6 @@ async def predict_frame(req: FrameRequest):
     Send one webcam frame as a base64 JPEG.
     Returns prediction once enough frames are buffered (omega=128).
     Before that, returns buffering status with fill percentage.
-
-    Example (Python client):
-        import base64, requests, cv2
-        cap = cv2.VideoCapture(0)
-        while True:
-            _, frame = cap.read()
-            _, buf = cv2.imencode('.jpg', frame)
-            b64 = base64.b64encode(buf).decode()
-            resp = requests.post('http://localhost:8000/predict/frame',
-                                 json={'image': b64})
-            print(resp.json())
     """
     try:
         img_bytes = base64.b64decode(req.image)
@@ -420,11 +422,11 @@ async def predict_frame(req: FrameRequest):
         result  = predictor.predict_map(ppg_map)
         buffer.last_result = result
         return {
-            'status':       'prediction',
-            'label':        result['label'],
-            'confidence':   result['confidence'],
-            'fake_prob':    result['fake_prob'],
-            'frames_seen':  buffer.frame_count,
+            'status':      'prediction',
+            'label':       result['label'],
+            'confidence':  result['confidence'],
+            'fake_prob':   result['fake_prob'],
+            'frames_seen': buffer.frame_count,
         }
 
     return {
@@ -446,53 +448,148 @@ async def status():
     }
 
 
+@app.get("/health")
+async def health():
+    """Liveness check, returns 200 if server and model are ready."""
+    if predictor is None:
+        raise HTTPException(503, "Model not loaded")
+    return {'status': 'ok', 'model': 'operational', 'server': 'operational'}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Server metrics for monitoring during stress tests."""
+    job_counts = {}
+    for j in jobs.values():
+        job_counts[j['status']] = job_counts.get(j['status'], 0) + 1
+    return {
+        'jobs':          job_counts,
+        'total_jobs':    len(jobs),
+        'workers':       MAX_VIDEO_WORKERS,
+        'max_upload_mb': MAX_UPLOAD_MB,
+        'job_ttl_hours': JOB_TTL_SECONDS // 3600,
+    }
+
+
 @app.post("/reset")
 async def reset():
     buffer.reset()
     return {'status': 'reset', 'message': 'Frame buffer cleared.'}
 
 
-@app.post("/predict/video")
-async def predict_video(file: UploadFile = File(...)):
-    """
-    Upload a video file and get a deepfake prediction.
-    Runs the full PPG extraction pipeline on the file — same as training.
-    Returns a per-segment breakdown and a final video-level verdict.
-
-    Accepted formats: .mp4, .avi, .mov, .mkv
-    Minimum length:   ~4.3s (128 frames at 30fps)
-    """
-    allowed = {'.mp4', '.avi', '.mov', '.mkv'}
-    ext     = os.path.splitext(file.filename or '')[1].lower()
-    if ext not in allowed:
-        raise HTTPException(400, f"Unsupported format '{ext}'. Use: {', '.join(allowed)}")
-
-    # write upload to a temp file — cv2.VideoCapture needs a real path
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
-
+def _run_video_job(job_id: str, tmp_path: str, filename: str):
+    """Worker function, runs in thread pool, updates jobs dict when done."""
     try:
-        logger.info(f"Processing uploaded video: {file.filename} ({os.path.getsize(tmp_path)//1024}KB)")
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, predictor.predict_video, tmp_path
-        )
-        logger.info(f"Video result: {result['label']} ({result['confidence']}%)")
-        return result
+        jobs[job_id]['status'] = 'processing'
+        result = predictor.predict_video(tmp_path)
+        jobs[job_id].update({'status': 'done', 'result': result})
+        logger.info(f"Job {job_id} done: {result['label']} ({result['confidence']}%)")
     except ValueError as e:
-        raise HTTPException(422, str(e))
+        jobs[job_id].update({'status': 'error', 'error': str(e)})
+        logger.warning(f"Job {job_id} validation error: {e}")
     except Exception as e:
-        logger.error(f"Video prediction failed: {e}")
-        raise HTTPException(500, f"Processing error: {e}")
+        jobs[job_id].update({'status': 'error', 'error': f"Processing error: {e}"})
+        logger.error(f"Job {job_id} failed: {e}")
     finally:
-        # on Windows the file may still be locked briefly after the executor finishes
-        import time
+        # release temp file, retry on Windows file lock
         for _ in range(5):
             try:
                 os.unlink(tmp_path)
                 break
             except PermissionError:
                 time.sleep(0.2)
+
+
+def _purge_old_jobs():
+    """Remove jobs older than JOB_TTL_SECONDS to prevent memory growth."""
+    cutoff = time.time() - JOB_TTL_SECONDS
+    stale  = [jid for jid, j in jobs.items() if j['created_at'] < cutoff]
+    for jid in stale:
+        del jobs[jid]
+    if stale:
+        logger.info(f"Purged {len(stale)} stale jobs")
+
+
+@app.post("/predict/video")
+async def predict_video(file: UploadFile = File(...)):
+    """
+    Upload a video file for deepfake analysis.
+    Returns a job_id immediately — poll GET /jobs/{job_id} for the result.
+    This is non-blocking so multiple uploads can be processed concurrently.
+    """
+    # file format check
+    allowed = {'.mp4', '.avi', '.mov', '.mkv'}
+    ext     = os.path.splitext(file.filename or '')[1].lower()
+    if ext not in allowed:
+        raise HTTPException(400, f"Unsupported format '{ext}'. Use: {', '.join(allowed)}")
+
+    # read and size-check before writing to disk
+    data = await file.read()
+    mb   = len(data) / 1024 / 1024
+    if mb > MAX_UPLOAD_MB:
+        raise HTTPException(413, f"File too large ({mb:.1f}MB). Max is {MAX_UPLOAD_MB}MB.")
+
+    # write to temp file — cv2.VideoCapture needs a real path
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+
+    # create job record and submit to bounded thread pool
+    _purge_old_jobs()
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        'status':     'queued',
+        'filename':   file.filename,
+        'size_mb':    round(mb, 2),
+        'created_at': time.time(),
+        'result':     None,
+        'error':      None,
+    }
+    video_executor.submit(_run_video_job, job_id, tmp_path, file.filename)
+    logger.info(f"Job {job_id} queued: {file.filename} ({mb:.1f}MB)")
+
+    return {
+        'job_id':   job_id,
+        'status':   'queued',
+        'filename': file.filename,
+        'size_mb':  round(mb, 2),
+        'poll_url': f"/jobs/{job_id}",
+        'message':  f"Job queued. Poll /jobs/{job_id} for result.",
+    }
+
+
+@app.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    """Poll for the result of a video prediction job."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, f"Job {job_id} not found. Jobs expire after {JOB_TTL_SECONDS//3600}h.")
+    return {
+        'job_id':   job_id,
+        'status':   job['status'],
+        'filename': job['filename'],
+        'size_mb':  job['size_mb'],
+        'result':   job.get('result'),
+        'error':    job.get('error'),
+        'age_sec':  round(time.time() - job['created_at']),
+    }
+
+
+@app.get("/jobs")
+async def list_jobs():
+    """List all active jobs — useful for monitoring stress test progress."""
+    summary = {
+        jid: {
+            'status':   j['status'],
+            'filename': j['filename'],
+            'age_sec':  round(time.time() - j['created_at']),
+        }
+        for jid, j in jobs.items()
+    }
+    counts = {}
+    for j in jobs.values():
+        counts[j['status']] = counts.get(j['status'], 0) + 1
+    return {'jobs': summary, 'counts': counts, 'total': len(jobs)}
 
 
 @app.websocket("/ws/predict")
@@ -502,12 +599,6 @@ async def websocket_predict(ws: WebSocket):
 
     Client sends: base64-encoded JPEG string (one per frame)
     Server sends: JSON with prediction or buffering status
-
-    JavaScript example (browser):
-        const ws = new WebSocket('ws://localhost:8000/ws/predict');
-        // Send frames from getUserMedia canvas
-        ws.send(canvas.toDataURL('image/jpeg', 0.7).split(',')[1]);
-        ws.onmessage = (e) => console.log(JSON.parse(e.data));
     """
     await ws.accept()
     ws_buffer = FrameBuffer()   # each WebSocket connection gets its own buffer
@@ -547,19 +638,19 @@ async def websocket_predict(ws: WebSocket):
                     ws_buffer.prob_history.append(result['fake_prob'])
                 smoothed_prob = float(np.mean(ws_buffer.prob_history)) if ws_buffer.prob_history else None
                 if smoothed_prob is not None and result['label'] != 'UNCERTAIN':
-                    label, conf              = classify_prob(smoothed_prob)
-                    result['label']          = label
-                    result['confidence']     = conf
-                    result['fake_prob']      = round(smoothed_prob, 4)
+                    label, conf          = classify_prob(smoothed_prob)
+                    result['label']      = label
+                    result['confidence'] = conf
+                    result['fake_prob']  = round(smoothed_prob, 4)
 
                 ws_buffer.last_result = result
                 await ws.send_json({
-                    'status':      'prediction',
-                    'label':       result['label'],
-                    'confidence':  result['confidence'],
-                    'fake_prob':   result['fake_prob'],
-                    'warning':     result.get('warning'),
-                    'frames_seen': ws_buffer.frame_count,
+                    'status':        'prediction',
+                    'label':         result['label'],
+                    'confidence':    result['confidence'],
+                    'fake_prob':     result['fake_prob'],
+                    'warning':       result.get('warning'),
+                    'frames_seen':   ws_buffer.frame_count,
                     'segments_seen': len(ws_buffer.prob_history),
                 })
             else:
@@ -891,64 +982,85 @@ async def demo_ui():
     if (e.dataTransfer.files[0]) onFileSelected(e.dataTransfer.files[0]);
   }
 
+  function showResult(data) {
+    // render a completed result dict into the upload UI
+    const statusEl = document.getElementById('up-status');
+    statusEl.textContent = data.label + ' (' + data.confidence + '%)';
+    statusEl.className   = 'status ' + data.label;
+
+    document.getElementById('up-bar-wrap').style.display = 'block';
+    document.getElementById('up-bar').style.width = '100%';
+    document.getElementById('up-log').textContent =
+      data.n_segments + ' segments analysed | ' +
+      data.total_frames + ' frames | face detected ' + data.face_pct + '% of frames';
+
+    updateProbs('up', data.fake_prob);
+
+    const tbody = document.getElementById('seg-tbody');
+    tbody.innerHTML = '';
+    (data.segments || []).forEach(s => {
+      const tr = document.createElement('tr');
+      tr.className = s.label === 'FAKE' ? 'fake-row' : s.label === 'UNCERTAIN' ? 'uncertain-row' : 'real-row';
+      tr.innerHTML =
+        '<td>' + s.segment + '</td>' +
+        '<td>' + s.start_sec + 's - ' + s.end_sec + 's</td>' +
+        '<td><span class="pill ' + s.label + '">' + s.label + '</span></td>' +
+        '<td>' + s.confidence + '%</td>' +
+        '<td>' + s.fake_prob + '</td>';
+      tbody.appendChild(tr);
+    });
+    document.getElementById('seg-section').style.display = 'block';
+  }
+
+  async function pollJob(jobId) {
+    // poll /jobs/{jobId} every 2s until done or error
+    const MAX_POLLS = 180;   // 6 minutes max
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const resp = await fetch('/jobs/' + jobId);
+      if (!resp.ok) throw new Error('Poll failed: ' + resp.statusText);
+      const job  = await resp.json();
+      if (job.status === 'queued' || job.status === 'processing') {
+        document.getElementById('up-status').textContent =
+          job.status === 'queued' ? 'Queued — waiting for worker...' : 'Processing...';
+      }
+      if (job.status === 'done')  return job.result;
+      if (job.status === 'error') throw new Error(job.error || 'Job failed');
+    }
+    throw new Error('Timed out waiting for result');
+  }
+
   async function analyzeVideo() {
     if (!selectedFile) return;
 
     // Show spinner, disable button
     document.getElementById('spinner').style.display = 'block';
     document.getElementById('analyze-btn').disabled = true;
-    document.getElementById('up-status').textContent = 'Analyzing... (this takes ~1s per second of video)';
+    document.getElementById('up-status').textContent = 'Uploading...';
     document.getElementById('up-status').className = 'status';
     document.getElementById('up-probs').style.display = 'none';
     document.getElementById('seg-section').style.display = 'none';
+    document.getElementById('up-bar-wrap').style.display = 'none';
 
     const formData = new FormData();
     formData.append('file', selectedFile);
 
     try {
+      // submit — returns job_id immediately
       const resp = await fetch('/predict/video', { method: 'POST', body: formData });
       const data = await resp.json();
-
       if (!resp.ok) {
         document.getElementById('up-status').textContent = 'Error: ' + (data.detail || resp.statusText);
         return;
       }
 
-      // Show verdict
-      const statusEl = document.getElementById('up-status');
-      statusEl.textContent = data.label + ' (' + data.confidence + '%)';
-      statusEl.className   = 'status ' + data.label;
-
-      // Show bar
-      document.getElementById('up-bar-wrap').style.display = 'block';
-      document.getElementById('up-bar').style.width = '100%';
-
-      // Summary log
-      document.getElementById('up-log').textContent =
-        data.n_segments + ' segments analysed | ' +
-        data.total_frames + ' frames | face detected ' + data.face_pct + '% of frames';
-
-      // Prob bars
-      updateProbs('up', data.fake_prob);
-
-      // Segment breakdown table
-      const tbody = document.getElementById('seg-tbody');
-      tbody.innerHTML = '';
-      data.segments.forEach(s => {
-        const tr = document.createElement('tr');
-        tr.className = s.label === 'FAKE' ? 'fake-row' : s.label === 'UNCERTAIN' ? 'uncertain-row' : 'real-row';
-        tr.innerHTML =
-          '<td>' + s.segment + '</td>' +
-          '<td>' + s.start_sec + 's - ' + s.end_sec + 's</td>' +
-          '<td><span class="pill ' + s.label + '">' + s.label + '</span></td>' +
-          '<td>' + s.confidence + '%</td>' +
-          '<td>' + s.fake_prob + '</td>';
-        tbody.appendChild(tr);
-      });
-      document.getElementById('seg-section').style.display = 'block';
+      // poll until done then render result
+      document.getElementById('up-status').textContent = 'Queued — waiting for worker...';
+      const result = await pollJob(data.job_id);
+      showResult(result);
 
     } catch(e) {
-      document.getElementById('up-status').textContent = 'Request failed: ' + e.message;
+      document.getElementById('up-status').textContent = 'Failed: ' + e.message;
     } finally {
       document.getElementById('spinner').style.display = 'none';
       document.getElementById('analyze-btn').disabled = false;
