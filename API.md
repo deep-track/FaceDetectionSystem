@@ -8,7 +8,7 @@ FakeCatcher detects deepfakes by analyzing subtle physiological signals (rPPG â€
 
 ## Table of Contents
 
-- [Endpoints at a Glance](#endpoints-at-a-glance)
+- [Endpoints](#endpoints)
 - [Frame Prediction](#frame-prediction)
 - [Video Prediction](#video-prediction)
 - [Job Management](#job-management)
@@ -18,7 +18,7 @@ FakeCatcher detects deepfakes by analyzing subtle physiological signals (rPPG â€
 
 ---
 
-## Endpoints at a Glance
+## Endpoints
 
 | Method | Endpoint | Auth | Description | Key Constraints |
 |--------|----------|------|-------------|-----------------|
