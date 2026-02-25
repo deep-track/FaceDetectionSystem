@@ -1,105 +1,54 @@
-# FakeCatcher API Documentation
+# FakeCatcher API Reference
 
-**Version:** 1.0\
-**Base URL:** `/`\
-**Protocol:** HTTP / WebSocket\
-**Content-Type:** `application/json` (unless otherwise specified)
+**Version:** 1.0 | **Base URL:** `/` | **Protocol:** HTTP / WebSocket | **Auth:** None required
 
-FakeCatcher API provides deepfake detection using remote
-photoplethysmography (rPPG) analysis and a CNN model. It supports:
+FakeCatcher detects deepfakes by analyzing subtle physiological signals (rPPG — remote photoplethysmography) extracted from facial regions, fed through a CNN classifier. It supports real-time frame analysis, async video processing, and WebSocket streaming.
 
--   Real-time frame prediction (REST & WebSocket)
--   Video upload and asynchronous processing
--   Job tracking and management
--   Health and system monitoring
+---
 
-------------------------------------------------------------------------
+## Table of Contents
 
-# Table of Contents
+- [Endpoints at a Glance](#endpoints-at-a-glance)
+- [Frame Prediction](#frame-prediction)
+- [Video Prediction](#video-prediction)
+- [Job Management](#job-management)
+- [System Endpoints](#system-endpoints)
+- [WebSocket Streaming](#websocket-streaming)
+- [Reference: Labels, Errors, Rate Limits](#reference)
 
--   [Overview](#overview)
--   [Authentication](#authentication)
--   [Rate Limits](#rate-limits)
--   [Endpoints Summary](#endpoints-summary)
--   [Frame Prediction](#frame-prediction)
--   [Video Prediction](#video-prediction)
--   [Job Management](#job-management)
--   [System Endpoints](#system-endpoints)
--   [WebSocket Endpoint](#websocket-endpoint)
--   [Prediction Labels](#prediction-labels)
--   [Error Handling](#error-handling)
+---
 
-------------------------------------------------------------------------
+## Endpoints at a Glance
 
-# Overview
+| Method | Endpoint | Auth | Description | Key Constraints |
+|--------|----------|------|-------------|-----------------|
+| `POST` | `/predict/frame` | — | Submit a single Base64-encoded JPEG frame | Buffers 128 frames before predicting (~4s) |
+| `POST` | `/predict/video` | — | Upload a video file for async analysis | `.mp4 .avi .mov .mkv` only; max 50 MB |
+| `GET` | `/jobs/{job_id}` | — | Poll status and result of a video job | Job TTL: 2 hours |
+| `GET` | `/jobs` | — | List all active jobs | — |
+| `GET` | `/status` | — | Inspect the current frame buffer state | — |
+| `POST` | `/reset` | — | Clear the frame buffer | — |
+| `GET` | `/health` | — | Liveness check for model and server | — |
+| `GET` | `/metrics` | — | System-wide stats (workers, queue depth, limits) | — |
+| `WS` | `/ws/predict` | — | Stream frames for real-time prediction | Same 128-frame buffer requirement |
 
-FakeCatcher analyzes subtle physiological signals extracted from facial
-regions to detect deepfake videos and images.
+---
 
-Prediction types:
+## Frame Prediction
 
-  Type     Input         Output
-  -------- ------------- -----------------------------
-  Frame    base64 JPEG   REAL / FAKE / UNCERTAIN
-  Video    video file    Full analysis with segments
-  Stream   live frames   Continuous predictions
+### `POST /predict/frame`
 
-------------------------------------------------------------------------
+Submit one JPEG frame at a time. Predictions are emitted after every 128-frame buffer is filled (~4 seconds at 30 fps). Subsequent frames continue the rolling buffer.
 
-# Authentication
-
-Authentication has been removed and is not required.
-
-------------------------------------------------------------------------
-
-# Rate Limits
-
-Default limits:
-
-  Limit                   Value
-  ----------------------- ---------------
-  Video upload requests   30 per minute
-  Max video size          50 MB
-  Concurrent video jobs   4
-  Job retention           2 hours
-
-------------------------------------------------------------------------
-
-# Endpoints Summary
-
-  Method   Endpoint           Description
-  -------- ------------------ -----------------------------
-  POST     `/predict/frame`   Submit frame for prediction
-  POST     `/predict/video`   Upload video for analysis
-  GET      `/jobs/{job_id}`   Get video job result
-  GET      `/jobs`            List all jobs
-  GET      `/status`          Frame buffer status
-  POST     `/reset`           Reset frame buffer
-  GET      `/health`          Health check
-  GET      `/metrics`         System metrics
-  WS       `/ws/predict`      Real-time prediction stream
-
-------------------------------------------------------------------------
-
-# Frame Prediction
-
-## POST /predict/frame
-
-Submit a single frame for prediction.
-
-Prediction occurs after 128 frames are buffered.
-
-## Request
-
-``` json
+**Request body**
+```json
 {
-  "image": "base64_encoded_jpeg"
+  "image": "<base64-encoded JPEG>"
 }
 ```
 
-## Response (Buffering)
-
-``` json
+**Response — buffering** (`< 128 frames`)
+```json
 {
   "status": "buffering",
   "fill_pct": 42,
@@ -108,9 +57,8 @@ Prediction occurs after 128 frames are buffered.
 }
 ```
 
-## Response (Prediction)
-
-``` json
+**Response — prediction** (`>= 128 frames`)
+```json
 {
   "status": "prediction",
   "label": "REAL",
@@ -120,50 +68,48 @@ Prediction occurs after 128 frames are buffered.
 }
 ```
 
-------------------------------------------------------------------------
+> **Note:** `fake_prob` is a float in `[0, 1]`. `confidence` is derived from the distance from the 0.5 decision boundary and expressed as a percentage.
 
-# Video Prediction
+---
 
-## POST /predict/video
+## Video Prediction
 
-Uploads a video for analysis.
+### `POST /predict/video`
 
-Returns immediately with job ID.
+Upload a video file for asynchronous deepfake analysis. Returns immediately with a `job_id`; poll `/jobs/{job_id}` for results.
 
-## Request
+**Request** — `multipart/form-data`
 
-Content-Type: multipart/form-data
+| Field | Type | Notes |
+|-------|------|-------|
+| `file` | binary | Accepted formats: `.mp4`, `.avi`, `.mov`, `.mkv`; max 50 MB |
 
-Field:
-
-    file: video file (.mp4, .avi, .mov, .mkv)
-
-## Response
-
-``` json
+**Response — job queued** `202`
+```json
 {
-  "job_id": "uuid",
+  "job_id": "3f2a1b4c-...",
   "status": "queued",
   "filename": "video.mp4",
   "size_mb": 12.5,
-  "poll_url": "/jobs/uuid",
+  "poll_url": "/jobs/3f2a1b4c-...",
   "message": "Job queued. Poll /jobs/{job_id} for result."
 }
 ```
 
-------------------------------------------------------------------------
+**Rate limit:** 30 upload requests per minute. Up to 4 jobs can process concurrently.
 
-# Job Management
+---
 
-## GET /jobs/{job_id}
+## Job Management
 
-Retrieve job status.
+### `GET /jobs/{job_id}`
 
-## Response
+Retrieve the current status or final result of a video analysis job.
 
-``` json
+**Response — completed job**
+```json
 {
-  "job_id": "uuid",
+  "job_id": "3f2a1b4c-...",
   "status": "done",
   "filename": "video.mp4",
   "size_mb": 12.5,
@@ -180,25 +126,38 @@ Retrieve job status.
 }
 ```
 
-## Job Status Values
+**Job status values**
 
-  Status       Description
-  ------------ -------------------------
-  queued       Waiting to be processed
-  processing   Currently analyzing
-  done         Completed successfully
-  error        Failed
+| Status | Meaning |
+|--------|---------|
+| `queued` | Waiting for an available worker |
+| `processing` | Actively being analysed |
+| `done` | Completed successfully — `result` is populated |
+| `error` | Processing failed — `error` contains the reason |
 
-------------------------------------------------------------------------
+**Result fields**
 
-## GET /jobs
+| Field | Type | Description |
+|-------|------|-------------|
+| `label` | string | `REAL`, `FAKE`, or `UNCERTAIN` |
+| `confidence` | float | Confidence percentage (0–100) |
+| `fake_prob` | float | Raw model probability (0–1) |
+| `total_frames` | int | Frames analysed |
+| `face_pct` | float | % of frames with a detectable face |
+| `n_segments` | int | Number of 128-frame segments used |
 
-List all active jobs.
+> **TTL:** Jobs expire 2 hours after creation. After expiry, `GET /jobs/{job_id}` returns `404`.
 
-``` json
+---
+
+### `GET /jobs`
+
+List all active (non-expired) jobs.
+
+```json
 {
   "jobs": {
-    "uuid": {
+    "3f2a1b4c-...": {
       "status": "processing",
       "filename": "video.mp4",
       "age_sec": 32
@@ -211,15 +170,15 @@ List all active jobs.
 }
 ```
 
-------------------------------------------------------------------------
+---
 
-# System Endpoints
+## System Endpoints
 
-## GET /status
+### `GET /status`
 
-Frame buffer status.
+Returns the current state of the frame buffer used by `/predict/frame` and `/ws/predict`.
 
-``` json
+```json
 {
   "buffer_fill_pct": 50,
   "frames_seen": 64,
@@ -229,26 +188,28 @@ Frame buffer status.
 }
 ```
 
-------------------------------------------------------------------------
+---
 
-## POST /reset
+### `POST /reset`
 
-Reset frame buffer.
+Clears the frame buffer. Useful when switching video sources mid-session.
 
-``` json
+```json
 {
   "status": "reset",
   "message": "Frame buffer cleared."
 }
 ```
 
-------------------------------------------------------------------------
+> **Warning:** This affects all concurrent callers sharing the same buffer instance. Not safe for multi-tenant deployments without per-client buffer isolation.
 
-## GET /health
+---
 
-Check system health.
+### `GET /health`
 
-``` json
+Lightweight liveness check. Returns `200` when both the model and HTTP server are operational.
+
+```json
 {
   "status": "ok",
   "model": "operational",
@@ -256,13 +217,15 @@ Check system health.
 }
 ```
 
-------------------------------------------------------------------------
+Use this endpoint for load-balancer health probes.
 
-## GET /metrics
+---
 
-System metrics.
+### `GET /metrics`
 
-``` json
+Returns system-wide operational stats.
+
+```json
 {
   "jobs": {
     "queued": 1,
@@ -277,21 +240,18 @@ System metrics.
 }
 ```
 
-------------------------------------------------------------------------
+---
 
-# WebSocket Endpoint
+## WebSocket Streaming
 
-## WS /ws/predict
+### `WS /ws/predict`
 
-Real-time prediction.
+Stream JPEG frames for continuous, real-time predictions. Shares the same 128-frame buffer logic as the REST frame endpoint.
 
-## Send
+**Send** — raw Base64-encoded JPEG string (one frame per message)
 
-Base64 JPEG string
-
-## Receive (Buffering)
-
-``` json
+**Receive — buffering**
+```json
 {
   "status": "buffering",
   "fill_pct": 30,
@@ -299,9 +259,8 @@ Base64 JPEG string
 }
 ```
 
-## Receive (Prediction)
-
-``` json
+**Receive — prediction** (emitted every 128 frames)
+```json
 {
   "status": "prediction",
   "label": "REAL",
@@ -312,58 +271,83 @@ Base64 JPEG string
 }
 ```
 
-------------------------------------------------------------------------
+`segments_seen` reflects how many complete 128-frame windows have been evaluated in this session.
 
-# Prediction Labels
+---
 
-  Label       Meaning
-  ----------- -----------------------------
-  REAL        Likely authentic
-  FAKE        Likely deepfake
-  UNCERTAIN   Insufficient signal quality
+## Reference
 
-------------------------------------------------------------------------
+### Prediction Labels
 
-# Error Handling
+| Label | Meaning |
+|-------|---------|
+| `REAL` | Signal is consistent with authentic physiological patterns |
+| `FAKE` | Signal is inconsistent — deepfake likely |
+| `UNCERTAIN` | Insufficient signal quality to classify (poor lighting, face not visible, etc.) |
 
-Errors follow HTTP status codes.
+---
 
-  Code   Meaning
-  ------ ---------------------
-  400    Bad request
-  404    Resource not found
-  413    File too large
-  429    Rate limit exceeded
-  500    Internal error
-  503    Service unavailable
+### Rate Limits & Constraints
 
-Example:
+| Limit | Value |
+|-------|-------|
+| Video uploads | 30 requests / minute |
+| Max video file size | 50 MB |
+| Concurrent video jobs | 4 |
+| Job retention (TTL) | 2 hours |
+| Min frames for prediction | 128 (~4s at 30 fps) |
+| Supported video formats | `.mp4`, `.avi`, `.mov`, `.mkv` |
 
-``` json
+---
+
+### Error Responses
+
+All errors follow standard HTTP status codes with a `detail` field.
+
+| Code | Meaning | Example trigger |
+|------|---------|-----------------|
+| `400` | Bad request | Malformed Base64, missing field |
+| `404` | Not found | Unknown or expired `job_id` |
+| `413` | Payload too large | Video exceeds 50 MB |
+| `429` | Rate limit exceeded | > 30 uploads/minute |
+| `500` | Internal server error | Model crash |
+| `503` | Service unavailable | Workers exhausted |
+
+**Example**
+```json
 {
   "detail": "Unsupported format '.wmv'. Use: .mp4, .avi, .mov, .mkv"
 }
 ```
 
-------------------------------------------------------------------------
+---
 
-# Architecture Overview
+## Architecture Overview
 
-Pipeline:
+```
+Input (frame / video / stream)
+        │
+        ▼
+  1. Face Detection
+        │
+        ▼
+  2. Signal Extraction (rPPG)
+        │
+        ▼
+  3. rPPG Map Generation
+        │
+        ▼
+  4. CNN Classification
+        │
+        ▼
+  5. Result Aggregation  ──►  REAL / FAKE / UNCERTAIN
+```
 
-1.  Face detection
-2.  Signal extraction
-3.  rPPG map generation
-4.  CNN classification
-5.  Result aggregation
+---
 
-------------------------------------------------------------------------
+## Tips for Best Accuracy
 
-# Notes
-
--   Minimum frames required: 128
--   Minimum video length: \~4 seconds
--   Face must be visible clearly
--   Better lighting improves accuracy
-
-------------------------------------------------------------------------
+- Ensure the subject's face is **clearly visible and well-lit**
+- Videos should be **at least 4 seconds** (128 frames minimum)
+- Avoid heavy compression artifacts — they degrade rPPG signal quality
+- `face_pct` in the video result indicates how reliably the face was tracked; values below ~70% may produce less reliable predictions
