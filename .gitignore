@@ -1,0 +1,10 @@
+# ignore these files
+.env
+myenv
+practice.py
+plot.ipynb
+train_xgboost.ipynb
+previous_code.py
+
+data/ppg_maps.npz
+data/split
