@@ -47,16 +47,16 @@ python training\train_cnn.py --maps data/ppg_maps.npz --output cnn_model.keras -
 # For SVM
 python training\train_svm.py --features data/features_svm_1000.npz --output data/svm_model.pkl
 ```
-## To start webcam 
+## To start backend application
 
 To start your webcam and check for real/fake probabilities, run
 ```bash
-uvicorn app:app --reload --port 8000
+uvicorn backend.main:app --reload --port 8000
 ```
 
 And the application will be live at `http://localhost:8000`
 
 ## Uploading videos
-Upload fake/real videos for analysis whenbooting up the live server, since recording deepfake videos and showing them directly to the webcam might be a lot of work to do.
+Upload fake/real videos for analysis when booting up the live server, since recording deepfake videos and showing them directly to the webcam might be a lot of work to do.
 
 `VIDEO_MODE` is used when uploading videos for processing, while `IMAGE_MODE` is used for webcam streaming for per-frame analysis.
