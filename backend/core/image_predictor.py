@@ -1,18 +1,16 @@
+import os
 import logging
 import timm
 import torch
 import torch.nn as nn
 from PIL import Image
-from huggingface_hub import hf_hub_download
 from torchvision import transforms
 
 logger = logging.getLogger("deeptrack.image")
 
-# import from HuggingFace
-model_path = hf_hub_download(
-    repo_id="dkkinyua/fakecatcher",
-    filename="../data/best_swin.pth"
-)
+LOCAL_MODEL_PATH = "data/best_swin.pth"
+HF_REPO_ID       = "dkkinyua/fakecatcher"
+HF_FILENAME      = "best_swin.pth"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -22,7 +20,7 @@ preprocess = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-# architecture
+
 class SwinTransformer(nn.Module):
     def __init__(self, num_classes=2):
         super().__init__()
@@ -44,10 +42,21 @@ class SwinTransformer(nn.Module):
         output   = self.classifier(features)
         return output, features
 
-# hidden method
+
+def _resolve_model_path() -> str:
+    """Use local weights if present, otherwise pull from HuggingFace."""
+    if os.path.exists(LOCAL_MODEL_PATH):
+        logger.info(f"Using local weights: {LOCAL_MODEL_PATH}")
+        return LOCAL_MODEL_PATH
+
+    logger.info(f"Local weights not found, downloading from HuggingFace ({HF_REPO_ID})...")
+    from huggingface_hub import hf_hub_download
+    path = hf_hub_download(repo_id=HF_REPO_ID, filename=HF_FILENAME)
+    logger.info(f"Downloaded to cache: {path}")
+    return path
+
+
 def _load_weights(model_path: str, device: torch.device) -> SwinTransformer:
-    """Load weights from checkpoint, handling three common save formats."""
-    logger.info(f"Loading Swin weights from {model_path} onto {device}...")
     model      = SwinTransformer(num_classes=2)
     checkpoint = torch.load(model_path, map_location=device)
 
@@ -56,7 +65,7 @@ def _load_weights(model_path: str, device: torch.device) -> SwinTransformer:
     elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
         state_dict = checkpoint["state_dict"]
     else:
-        state_dict = checkpoint  # raw state_dict saved directly
+        state_dict = checkpoint
 
     model.load_state_dict(state_dict)
     model.to(device)
@@ -65,10 +74,10 @@ def _load_weights(model_path: str, device: torch.device) -> SwinTransformer:
     return model
 
 
-# predictor
 class ImagePredictor:
-    def __init__(self, model_path: str = model_path):
+    def __init__(self):
         self.device = DEVICE
+        model_path  = _resolve_model_path()
         self.model  = _load_weights(model_path, self.device)
 
     def predict(self, image: Image.Image) -> dict:
