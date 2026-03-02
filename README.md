@@ -51,6 +51,7 @@ python training\train_svm.py --features data/features_svm_1000.npz --output data
 
 To start your webcam and check for real/fake probabilities, run
 ```bash
+cd backend
 uvicorn backend.main:app --reload --port 8000
 ```
 
