@@ -59,11 +59,12 @@ And the application will be live at `http://localhost:8000`
 
 ### For frontend integration and CORS config
 For the backend to communicate with the frontend, Cross Origin Resource Sharing (CORS) needs to be set up.
-For the backend, set up your `.env` to protect the origins and head over to line 83 of `backend/main.py` at `fastapi.middleware.cors.CORSMiddleware` and change from `allow_origins=["*"]` to  `allow_origins=[f"{origin_paths}"]` to prevent the backend being accessible from all origins.
+For the backend, set up your `.env` to protect the origins and head over to line 83 of `backend/main.py` at `fastapi.middleware.cors.CORSMiddleware` and change from `allow_origins=["*"]` to  `allow_origins=["ALLOWED_ORIGINS"]` to prevent the backend being accessible from all origins.
 
 This change will be made to the backend code before pushing to the prod server upon receiving the frontend server URLs.
 Check the example below on how to do this:
 
+#### a. Set up allowed origins in `.env`
 ```python
 
 # set up CORSMiddleware
