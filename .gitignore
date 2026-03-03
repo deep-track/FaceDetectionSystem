@@ -8,3 +8,5 @@ previous_code.py
 
 data/ppg_maps.npz
 data/split
+
+backend/__pycache__
