@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -19,39 +20,44 @@ _startup_time: float = 0.0
 async def lifespan(app: FastAPI):
     global _startup_time
     _startup_time = time.time()
-    logger.info("=== DeepTrack startup ===")
+    app.state.video_predictor = None
+    app.state.video_buffer    = None
+    app.state.image_predictor = None
+    app.state.jobs            = {}
 
-    # video model
-    try:
-        app.state.video_predictor = VideoPredictor()
-        app.state.video_buffer    = FrameBuffer()
-        logger.info("Video predictor ready.")
-    except SystemExit:
-        raise
-    except Exception as e:
-        logger.error(f"Video predictor failed: {e}")
-        app.state.video_predictor = None
-        app.state.video_buffer    = None
+    # load models in background so port binds immediately
+    asyncio.create_task(_load_models(app))
 
-    # image model
-    try:
-        app.state.image_predictor = ImagePredictor()
-        logger.info("Image predictor ready.")
-    except Exception as e:
-        logger.error(f"Image predictor failed: {e}")
-        app.state.image_predictor = None
-
-    # shared async job store
-    app.state.jobs = {}
-
-    logger.info("=== DeepTrack ready ===")
     yield
 
-    logger.info("Shutting down...")
     if app.state.video_predictor:
         app.state.video_predictor.close()
     from routers.video import video_executor
     video_executor.shutdown(wait=False)
+
+
+async def _load_models(app: FastAPI):
+    loop = asyncio.get_event_loop()
+    logger.info("=== DeepTrack model loading (background) ===")
+
+    # video — run in thread since TF/MediaPipe are blocking
+    try:
+        vp = await loop.run_in_executor(None, VideoPredictor)
+        app.state.video_predictor = vp
+        app.state.video_buffer    = FrameBuffer()
+        logger.info("Video predictor ready.")
+    except Exception as e:
+        logger.error(f"Video predictor failed: {e}")
+
+    # image — also blocking (torch + HF download)
+    try:
+        ip = await loop.run_in_executor(None, ImagePredictor)
+        app.state.image_predictor = ip
+        logger.info("Image predictor ready.")
+    except Exception as e:
+        logger.error(f"Image predictor failed: {e}")
+
+    logger.info("=== All models loaded ===")
 
 
 app = FastAPI(
