@@ -1,6 +1,5 @@
 import os
 import cv2
-import sys
 import logging
 import numpy as np
 import mediapipe as mp
@@ -11,8 +10,9 @@ from scipy.signal import butter, filtfilt, welch
 
 logger = logging.getLogger("deeptrack.video")
 
-CNN_MODEL_PATH  = "../data/cnn_model.keras"
-LANDMARKER_PATH = "../data/face_landmarker.task"
+CNN_MODEL_PATH  = "data/cnn_model.keras"
+LANDMARKER_PATH = "data/face_landmarker.task"
+HF_REPO_ID      = "dkkinyua/fakecatcher"
 OMEGA           = 128
 N_SUBREGIONS    = 32
 FS              = 30
@@ -30,6 +30,21 @@ MID_FACE_32 = [
     378, 379, 365, 397,
 ]
 
+
+def _resolve_path(local_path: str, hf_filename: str) -> str:
+    """Use local file if present, otherwise download from HuggingFace."""
+    if os.path.exists(local_path):
+        logger.info(f"Using local file: {local_path}")
+        return local_path
+    logger.info(f"{local_path} not found — downloading {hf_filename} from HuggingFace...")
+    from huggingface_hub import hf_hub_download
+    path = hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename=hf_filename,
+        token=os.getenv("HUGGINGFACE_TOKEN"),
+    )
+    logger.info(f"Downloaded: {path}")
+    return path
 
 # helper funcs
 def butterworth_filter(signal):
@@ -109,7 +124,6 @@ def sample_patch(frame_bgr, landmarks, lm_idx, h, w, patch_px=8):
     patch = frame_bgr[y0:y1, x0:x1].astype(np.float64)
     return patch[:, :, 2].mean(), patch[:, :, 1].mean(), patch[:, :, 0].mean()
 
-# frame buffer class
 class FrameBuffer:
     def __init__(self):
         self.R = [deque(maxlen=OMEGA) for _ in range(N_SUBREGIONS)]
@@ -146,22 +160,19 @@ class FrameBuffer:
     def fill_pct(self):
         return int(len(self.R[0]) / OMEGA * 100)
 
-
 class VideoPredictor:
     def __init__(self):
-        if not os.path.exists(CNN_MODEL_PATH):
-            raise FileNotFoundError(f"CNN model not found: {CNN_MODEL_PATH}")
-        if not os.path.exists(LANDMARKER_PATH):
-            raise FileNotFoundError(f"Landmarker not found: {LANDMARKER_PATH}")
+        cnn_path        = _resolve_path(CNN_MODEL_PATH,  "cnn_model.keras")
+        landmarker_path = _resolve_path(LANDMARKER_PATH, "face_landmarker.task")
 
         logger.info("Loading CNN model...")
         import tensorflow as tf
         from tensorflow import keras
-        self.model = keras.models.load_model(CNN_MODEL_PATH)
+        self.model = keras.models.load_model(cnn_path)
         logger.info("CNN model loaded.")
 
         logger.info("Loading MediaPipe FaceLandmarker (IMAGE mode)...")
-        base_opts  = mp_python.BaseOptions(model_asset_path=LANDMARKER_PATH)
+        base_opts  = mp_python.BaseOptions(model_asset_path=landmarker_path)
         image_opts = mp_vision.FaceLandmarkerOptions(
             base_options=base_opts,
             running_mode=mp_vision.RunningMode.IMAGE,
@@ -171,7 +182,7 @@ class VideoPredictor:
         )
         self.landmarker      = mp_vision.FaceLandmarker.create_from_options(image_opts)
         self.lm_indices      = MID_FACE_32[:N_SUBREGIONS]
-        self.landmarker_path = LANDMARKER_PATH
+        self.landmarker_path = landmarker_path
         logger.info("FaceLandmarker loaded.")
 
     def extract_frame_rgb(self, frame_bgr):
