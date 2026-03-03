@@ -2,92 +2,118 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from core.video_predictor import VideoPredictor, FrameBuffer
-from core.image_predictor import ImagePredictor
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from routers import video, image
-from routers.video import MAX_VIDEO_WORKERS, MAX_UPLOAD_MB, JOB_TTL_SECONDS
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+)
 logger = logging.getLogger("deeptrack.main")
 
 _startup_time: float = 0.0
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _startup_time
-    _startup_time = time.time()
-    app.state.video_predictor = None
-    app.state.video_buffer    = None
-    app.state.image_predictor = None
-    app.state.jobs            = {}
-
-    # load models in background so port binds immediately
-    asyncio.create_task(_load_models(app))
-
-    yield
-
-    if app.state.video_predictor:
-        app.state.video_predictor.close()
-    from routers.video import video_executor
-    video_executor.shutdown(wait=False)
-
-
 async def _load_models(app: FastAPI):
+    """
+    move all heavy imports such as tensorflow, mediapipe
+    to this function so easier port binding in prod
+    """
     loop = asyncio.get_event_loop()
     logger.info("=== DeepTrack model loading (background) ===")
 
-    # video — run in thread since TF/MediaPipe are blocking
     try:
+        from core.video_predictor import VideoPredictor, FrameBuffer
         vp = await loop.run_in_executor(None, VideoPredictor)
         app.state.video_predictor = vp
         app.state.video_buffer    = FrameBuffer()
         logger.info("Video predictor ready.")
     except Exception as e:
-        logger.error(f"Video predictor failed: {e}")
+        logger.error(f"Video predictor failed to load: {e}")
 
-    # image — also blocking (torch + HF download)
     try:
+        from core.image_predictor import ImagePredictor
         ip = await loop.run_in_executor(None, ImagePredictor)
         app.state.image_predictor = ip
         logger.info("Image predictor ready.")
     except Exception as e:
-        logger.error(f"Image predictor failed: {e}")
+        logger.error(f"Image predictor failed to load: {e}")
 
     logger.info("=== All models loaded ===")
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _startup_time
+    _startup_time = time.time()
+
+    app.state.video_predictor = None
+    app.state.video_buffer    = None
+    app.state.image_predictor = None
+    app.state.jobs            = {}
+
+    asyncio.create_task(_load_models(app))
+    logger.info("=== DeepTrack server started — models loading in background ===")
+
+    yield
+
+    logger.info("Shutting down...")
+    if app.state.video_predictor:
+        app.state.video_predictor.close()
+    try:
+        from routers.video import video_executor
+        video_executor.shutdown(wait=False)
+    except Exception:
+        pass
+
+
 app = FastAPI(
-    title="DeepTrack API", version="1.0",
-    description="Unified deepfake detection — `/v1/video/*` (rPPG) · `/v1/image/*` (Swin-T)",
+    title="DeepTrack API",
+    version="1.0",
+    description=(
+        "Unified deepfake detection API.\n\n"
+        "- `/v1/video/*` — rPPG biological signal analysis (video)\n"
+        "- `/v1/image/*` — Swin Transformer visual analysis (image)"
+    ),
     lifespan=lifespan,
 )
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"],
-                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# moved these imports here for same binding issue
+from routers import video, image
 app.include_router(video.router, prefix="/v1/video", tags=["Video"])
 app.include_router(image.router, prefix="/v1/image", tags=["Image"])
+
 
 @app.get("/v1/health", tags=["System"])
 async def health():
     return {
         "status":         "ok",
         "uptime_seconds": round(time.time() - _startup_time),
-        "video_model":    "operational" if app.state.video_predictor else "unavailable",
-        "image_model":    "operational" if app.state.image_predictor else "unavailable",
+        "video_model":    "operational" if app.state.video_predictor else "loading",
+        "image_model":    "operational" if app.state.image_predictor else "loading",
     }
 
 
 @app.get("/v1/status", tags=["System"])
 async def status():
-    jobs   = app.state.jobs
+    try:
+        from routers.video import MAX_VIDEO_WORKERS, MAX_UPLOAD_MB, JOB_TTL_SECONDS
+    except Exception:
+        MAX_VIDEO_WORKERS = MAX_UPLOAD_MB = JOB_TTL_SECONDS = None
+
+    jobs   = app.state.jobs or {}
     counts = {}
     for j in jobs.values():
         counts[j["status"]] = counts.get(j["status"], 0) + 1
+
     vb = app.state.video_buffer
     return {
         "uptime_seconds": round(time.time() - _startup_time),
@@ -99,7 +125,7 @@ async def status():
             "total_jobs":      len(jobs),
             "max_workers":     MAX_VIDEO_WORKERS,
             "max_upload_mb":   MAX_UPLOAD_MB,
-            "job_ttl_hours":   JOB_TTL_SECONDS // 3600,
+            "job_ttl_hours":   JOB_TTL_SECONDS // 3600 if JOB_TTL_SECONDS else None,
         },
         "image": {
             "model_loaded": app.state.image_predictor is not None,
