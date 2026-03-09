@@ -44,17 +44,20 @@ class SwinTransformer(nn.Module):
 
 
 def _resolve_model_path() -> str:
-    """Use local weights if present, otherwise pull from HuggingFace."""
+    """Use local weights if present, otherwise use HuggingFace cache."""
     if os.path.exists(LOCAL_MODEL_PATH):
         logger.info(f"Using local weights: {LOCAL_MODEL_PATH}")
         return LOCAL_MODEL_PATH
 
-    logger.info(f"Local weights not found, downloading from HuggingFace ({HF_REPO_ID})...")
     from huggingface_hub import hf_hub_download
-    path = hf_hub_download(repo_id=HF_REPO_ID, filename=HF_FILENAME)
-    logger.info(f"Downloaded to cache: {path}")
+    logger.info(f"Resolving from HuggingFace cache ({HF_REPO_ID})...")
+    path = hf_hub_download(
+        repo_id=HF_REPO_ID,
+        filename=HF_FILENAME,
+        token=os.getenv("HUGGINGFACE_TOKEN"),
+    )
+    logger.info(f"Resolved to: {path}")
     return path
-
 
 def _load_weights(model_path: str, device: torch.device) -> SwinTransformer:
     model      = SwinTransformer(num_classes=2)
