@@ -10,3 +10,16 @@ data/ppg_maps.npz
 data/split
 
 backend/__pycache__
+data/
+*.keras
+*.pkl
+*.npz
+*.pth
+*.db
+__pycache__/
+mlruns/
+*.ipynb
+processing.log
+training_history.png
+cnn_model.keras
+svm_model.pkl

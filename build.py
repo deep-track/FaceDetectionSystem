@@ -1,11 +1,10 @@
 """
-Downloads the HF models on Render at app startup and deploy
+build.py — pre-download models from HuggingFace during Render build step
 """
 import os
-from dotenv import load_dotenv
 from huggingface_hub import hf_hub_download
-
-load_dotenv()
+# forces consistent cache path between build step and running server
+os.environ["HF_HOME"] = "/opt/render/.cache/huggingface"
 
 REPO_ID = "dkkinyua/fakecatcher"
 TOKEN   = os.getenv("HUGGINGFACE_TOKEN")
@@ -27,10 +26,11 @@ for filename in FILES:
             repo_id=REPO_ID,
             filename=filename,
             token=TOKEN,
+            cache_dir=os.path.join(os.environ["HF_HOME"], "hub"),
         )
         print(f"{filename} cached at {path}")
     except Exception as e:
         print(f"{filename} failed: {e}")
-        raise  # fail the build if any model is missing
+        raise
 
 print("\n✅ All models downloaded successfully.")
