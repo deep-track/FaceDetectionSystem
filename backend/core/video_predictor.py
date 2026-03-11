@@ -13,11 +13,12 @@ logger = logging.getLogger("deeptrack.video")
 CNN_MODEL_PATH  = "data/cnn_model.keras"
 LANDMARKER_PATH = "data/face_landmarker.task"
 HF_REPO_ID      = "dkkinyua/fakecatcher"
-OMEGA           = 128
-N_SUBREGIONS    = 32
-FS              = 30
-LOW_HZ          = 0.7
-HIGH_HZ         = 14.0
+
+OMEGA               = 128
+N_SUBREGIONS        = 32
+FS                  = 30
+LOW_HZ              = 0.7
+HIGH_HZ             = 14.0
 THRESHOLD_FAKE      = 0.65
 THRESHOLD_UNCERTAIN = 0.45
 SMOOTHING_WINDOW    = 3
@@ -32,7 +33,6 @@ MID_FACE_32 = [
 
 
 def _resolve_path(local_path: str, hf_filename: str) -> str:
-    """Use local file if present, otherwise download from HuggingFace."""
     if os.path.exists(local_path):
         logger.info(f"Using local file: {local_path}")
         return local_path
@@ -46,7 +46,9 @@ def _resolve_path(local_path: str, hf_filename: str) -> str:
     logger.info(f"Downloaded: {path}")
     return path
 
-# helper funcs
+
+# ── Signal helpers ────────────────────────────────────────────────────────────
+
 def butterworth_filter(signal):
     nyq  = FS / 2.0
     b, a = butter(4, [LOW_HZ / nyq, min(HIGH_HZ / nyq, 0.999)], btype="band")
@@ -124,6 +126,9 @@ def sample_patch(frame_bgr, landmarks, lm_idx, h, w, patch_px=8):
     patch = frame_bgr[y0:y1, x0:x1].astype(np.float64)
     return patch[:, :, 2].mean(), patch[:, :, 1].mean(), patch[:, :, 0].mean()
 
+
+# ── FrameBuffer ───────────────────────────────────────────────────────────────
+
 class FrameBuffer:
     def __init__(self):
         self.R = [deque(maxlen=OMEGA) for _ in range(N_SUBREGIONS)]
@@ -159,6 +164,9 @@ class FrameBuffer:
     @property
     def fill_pct(self):
         return int(len(self.R[0]) / OMEGA * 100)
+
+
+# ── VideoPredictor ────────────────────────────────────────────────────────────
 
 class VideoPredictor:
     def __init__(self):
@@ -202,6 +210,7 @@ class VideoPredictor:
     def predict_map(self, ppg_map: np.ndarray,
                     quality_ok: bool = True, quality_reason: str = "ok",
                     snr: float = 1.0) -> dict:
+        """Single-map predict — used by webcam/frame endpoints."""
         if not quality_ok:
             return {"label": "UNCERTAIN", "confidence": 0.0,
                     "fake_prob": None, "warning": quality_reason}
@@ -209,6 +218,22 @@ class VideoPredictor:
         label, conf = classify_prob(prob)
         return {"label": label, "confidence": conf,
                 "fake_prob": round(prob, 4), "snr": round(snr, 4)}
+
+    def _batch_predict(self, ppg_maps: list) -> list:
+        """
+        One model.predict() call for all segments instead of one per segment.
+        Reduces inference calls from n_segments down to 1.
+        Signal integrity is completely unchanged — same frames, same overlap.
+        Returns list of (prob, label, confidence) tuples.
+        """
+        batch = np.concatenate(ppg_maps, axis=0)          # (n_segs, 128, 64, 1)
+        preds = self.model.predict(batch, verbose=0)[:, 0] # (n_segs,)
+        results = []
+        for prob in preds:
+            prob = round(float(prob), 4)
+            label, conf = classify_prob(prob)
+            results.append((prob, label, conf))
+        return results
 
     def predict_video(self, video_path: str) -> dict:
         cap = cv2.VideoCapture(video_path)
@@ -218,6 +243,7 @@ class VideoPredictor:
         if video_fps <= 0 or video_fps > 240:
             video_fps = FS
 
+        # ── Phase 1: full frame extraction — every frame, no skipping ─────────
         map_R = [[] for _ in range(N_SUBREGIONS)]
         map_G = [[] for _ in range(N_SUBREGIONS)]
         map_B = [[] for _ in range(N_SUBREGIONS)]
@@ -264,29 +290,38 @@ class VideoPredictor:
             raise ValueError(
                 f"Face detected in only {face_pct}% of frames — ensure face is visible")
 
+        # ── Phase 2: build all PPG maps — 50% overlap preserved ───────────────
         step     = OMEGA // 2
-        segments = []
-        probs    = []
+        ppg_maps = []
+        seg_meta = []
         for start in range(0, total_frames - OMEGA + 1, step):
-            end     = start + OMEGA
-            ppg_map = build_ppg_map(
+            end = start + OMEGA
+            ppg_maps.append(build_ppg_map(
                 [map_R[i][start:end] for i in range(N_SUBREGIONS)],
                 [map_G[i][start:end] for i in range(N_SUBREGIONS)],
                 [map_B[i][start:end] for i in range(N_SUBREGIONS)],
-            )
-            result = self.predict_map(ppg_map)
-            probs.append(result["fake_prob"])
+            ))
+            seg_meta.append((start, end))
+
+        # ── Phase 3: single batch predict for all segments ────────────────────
+        batch_results = self._batch_predict(ppg_maps)
+
+        segments = []
+        probs    = []
+        for idx, ((start, end), (prob, label, conf)) in enumerate(zip(seg_meta, batch_results)):
+            probs.append(prob)
             segments.append({
-                "segment":    len(segments) + 1,
+                "segment":    idx + 1,
                 "start_sec":  round(start / FS, 1),
                 "end_sec":    round(end   / FS, 1),
-                "label":      result["label"],
-                "confidence": result["confidence"],
-                "fake_prob":  result["fake_prob"],
+                "label":      label,
+                "confidence": conf,
+                "fake_prob":  prob,
             })
 
         avg_prob          = float(np.mean(probs))
         label, confidence = classify_prob(avg_prob)
+
         return {
             "label":        label,
             "confidence":   confidence,
