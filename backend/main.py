@@ -2,9 +2,13 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from core.limiter import limiter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,6 +82,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# rate limiter config
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -88,9 +97,25 @@ app.add_middleware(
 
 # moved these imports here for same binding issue
 from routers import video, image
-app.include_router(video.router, prefix="/v1/video", tags=["Video"])
-app.include_router(image.router, prefix="/v1/image", tags=["Image"])
+from routers.admin import router as admin_router
 
+app.include_router(video.router,  prefix="/v1/video", tags=["Video"])
+app.include_router(image.router,  prefix="/v1/image", tags=["Image"])
+app.include_router(admin_router,  prefix="/admin",    tags=["Admin"])
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """
+    rate limit exception handler func
+    """
+    limit = getattr(request.state, "api_limit", "unknown")
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": f"Daily limit of {limit} requests exceeded. "
+                      f"Contact support to increase your limit."
+        },
+    )
 
 @app.get("/v1/health", tags=["System"])
 async def health():
