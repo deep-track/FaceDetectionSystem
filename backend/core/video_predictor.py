@@ -19,9 +19,9 @@ N_SUBREGIONS        = 32
 FS                  = 30
 LOW_HZ              = 0.7
 HIGH_HZ             = 14.0
-THRESHOLD_FAKE      = 0.65
-THRESHOLD_UNCERTAIN = 0.45
-SMOOTHING_WINDOW    = 3
+THRESHOLD_FAKE      = 0.72
+THRESHOLD_UNCERTAIN = 0.50
+SMOOTHING_WINDOW    = 6
 
 MID_FACE_32 = [
     1, 4, 5, 6, 8, 9, 10, 151,
