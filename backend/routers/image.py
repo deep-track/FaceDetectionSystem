@@ -1,14 +1,23 @@
 import io
 import logging
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from PIL import Image
+
+from core.auth import verify_api_key
+from core.limiter import limiter, get_api_limit
 
 logger = logging.getLogger("deeptrack.image")
 router = APIRouter()
 
+
 @router.post("/predict")
-async def predict_image(request: Request, file: UploadFile = File(...)):
+@limiter.limit(get_api_limit)
+async def predict_image(
+    request: Request,
+    file: UploadFile = File(...),
+    _key: dict = Depends(verify_api_key),
+):
     """Classify a single image as Real or Fake."""
     predictor = request.app.state.image_predictor
     if predictor is None:
