@@ -98,10 +98,12 @@ app.add_middleware(
 # moved these imports here for same binding issue
 from routers import video, image
 from routers.admin import router as admin_router
+from routers.client import router as client_router
 
 app.include_router(video.router,  prefix="/v1/video", tags=["Video"])
 app.include_router(image.router,  prefix="/v1/image", tags=["Image"])
 app.include_router(admin_router,  prefix="/admin",    tags=["Admin"])
+app.include_router(client_router, prefix="/v1/client", tags=["Client"])
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
