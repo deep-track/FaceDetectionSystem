@@ -60,10 +60,7 @@ def generate_api_key(owner: str, user_id: str, daily_limit: int = 10, notes: str
 
 
 async def verify_api_key(request: Request) -> dict:
-    """
-    FastAPI dependency — validates key, enforces daily rate limit via Redis,
-    and attaches api_limit to request.state.
-    """
+    """Validates key and checks limit. Does not increment the counter."""
     raw_key = request.headers.get("X-API-Key")
     if not raw_key:
         raise HTTPException(status_code=401, detail="Missing X-API-Key header.")
@@ -87,15 +84,14 @@ async def verify_api_key(request: Request) -> dict:
     key_row     = res.data
     daily_limit = key_row["daily_limit"]
 
-    # Redis counter — one key per api_key per day, auto-expires at midnight
+    # check current usage without incrementing
     r = get_redis()
     if r:
         today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         redis_key = f"ratelimit:{key_row['id']}:{today}"
-        used      = r.incr(redis_key)  # atomic increment, returns new count
-        if used == 1:
-            r.expireat(redis_key, _next_midnight())  # set TTL on first request of the day
-        if used > daily_limit:
+        val       = r.get(redis_key)
+        used      = int(val) if val else 0
+        if used >= daily_limit:
             raise HTTPException(
                 status_code=429,
                 detail=f"Daily limit of {daily_limit} requests exceeded. "
@@ -104,5 +100,20 @@ async def verify_api_key(request: Request) -> dict:
 
     request.state.api_key_row = key_row
     request.state.api_limit   = daily_limit
-
     return key_row
+
+
+def increment_usage(request: Request):
+    """
+    Increments the Redis counter for this key.
+    Call this only after a successful prediction.
+    """
+    r = get_redis()
+    if not r:
+        return
+    key_row   = request.state.api_key_row
+    today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    redis_key = f"ratelimit:{key_row['id']}:{today}"
+    used      = r.incr(redis_key)
+    if used == 1:
+        r.expireat(redis_key, _next_midnight())
