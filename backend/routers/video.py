@@ -10,8 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-
-from core.auth import verify_api_key
+from core.auth import verify_api_key, increment_usage
 from core.video_predictor import (
     FrameBuffer, N_SUBREGIONS, OMEGA, FS,
     build_ppg_map, classify_prob, signal_quality,
@@ -29,8 +28,10 @@ video_executor = ThreadPoolExecutor(
     thread_name_prefix="deeptrack-video",
 )
 
+
 class FrameRequest(BaseModel):
     image: str  # base64-encoded JPEG
+
 
 def _purge_old_jobs(jobs: dict):
     cutoff = time.time() - JOB_TTL_SECONDS
@@ -41,11 +42,12 @@ def _purge_old_jobs(jobs: dict):
         logger.info(f"Purged {len(stale)} stale jobs")
 
 
-def _run_video_job(job_id: str, tmp_path: str, predictor, jobs: dict):
+def _run_video_job(job_id: str, tmp_path: str, predictor, jobs: dict, request: Request):
     try:
         jobs[job_id]["status"] = "processing"
         result = predictor.predict_video(tmp_path)
         jobs[job_id].update({"status": "done", "result": result})
+        increment_usage(request)  # only counts on successful completion
         logger.info(f"Job {job_id} done: {result['label']} ({result['confidence']}%)")
     except ValueError as e:
         jobs[job_id].update({"status": "error", "error": str(e)})
@@ -62,16 +64,14 @@ def _run_video_job(job_id: str, tmp_path: str, predictor, jobs: dict):
                 time.sleep(0.2)
 
 
-# Protected endpoint, require api_key
+# Protected endpoints — require X-API-Key header
+
 @router.post("/predict/video")
 async def predict_video(
     request: Request,
     file: UploadFile = File(...),
     _key: dict = Depends(verify_api_key),
 ):
-    """
-    Predicts video real/fake probabilities and returns a score card
-    """
     predictor = request.app.state.video_predictor
     jobs      = request.app.state.jobs
     if predictor is None:
@@ -98,7 +98,7 @@ async def predict_video(
         "size_mb": round(mb, 2), "created_at": time.time(),
         "result": None, "error": None,
     }
-    video_executor.submit(_run_video_job, job_id, tmp_path, predictor, jobs)
+    video_executor.submit(_run_video_job, job_id, tmp_path, predictor, jobs, request)
     logger.info(f"Job {job_id} queued: {file.filename} ({mb:.1f}MB)")
 
     return {"job_id": job_id, "status": "queued", "filename": file.filename,
@@ -137,7 +137,8 @@ async def list_jobs(
     return {"jobs": summary, "counts": counts, "total": len(jobs)}
 
 
-# Open endpoints, no key required (demo UI, WebSocket, reset)
+# Open endpoints — no key required
+
 @router.post("/predict/frame")
 async def predict_frame(req: FrameRequest, request: Request):
     predictor = request.app.state.video_predictor
@@ -298,6 +299,25 @@ async def video_ui():
       font-family: var(--mono); font-size: .65rem; letter-spacing: .1em;
       text-transform: uppercase; white-space: nowrap;
     }
+    .usage-bar {
+      width: 100%; background: #090d11; border-bottom: 1px solid var(--border);
+      padding: 8px 40px; display: none;
+    }
+    .usage-bar-inner {
+      max-width: 860px; margin: 0 auto; display: flex; align-items: center; gap: 12px;
+    }
+    .usage-label-txt {
+      font-family: var(--mono); font-size: .65rem; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--muted); white-space: nowrap;
+    }
+    .usage-track { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+    .usage-fill  { height: 100%; border-radius: 2px; background: var(--accent); transition: width .5s ease; }
+    .usage-fill.warn   { background: var(--uncertain); }
+    .usage-fill.danger { background: var(--fake); }
+    .usage-count {
+      font-family: var(--mono); font-size: .65rem; letter-spacing: .08em;
+      color: var(--muted); white-space: nowrap; min-width: 110px; text-align: right;
+    }
     main { width: 100%; max-width: 860px; padding: 32px 20px 0; }
     .page-title { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 24px; }
     .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 28px; }
@@ -402,8 +422,18 @@ async def video_ui():
 <div class="key-bar">
   <span class="key-label">API Key</span>
   <input type="password" id="api-key-input" class="key-input"
-         placeholder="dt_your_key_here" oninput="saveKey()">
+         placeholder="dt_your_key_here" oninput="onKeyInput()">
   <span class="key-status" id="key-status"></span>
+</div>
+
+<div class="usage-bar" id="usage-bar">
+  <div class="usage-bar-inner">
+    <span class="usage-label-txt">Daily Usage</span>
+    <div class="usage-track">
+      <div class="usage-fill" id="usage-fill" style="width:0%"></div>
+    </div>
+    <span class="usage-count" id="usage-count">— remaining</span>
+  </div>
 </div>
 
 <main>
@@ -518,17 +548,38 @@ async def video_ui():
 <canvas id="canvas" width="480" height="360" style="display:none"></canvas>
 
 <script>
-  function saveKey() {
+  // fetches /v1/client/usage/me and updates the usage bar
+  async function loadUsage() {
+    const key = getKey();
+    if (!key) return;
+    try {
+      const r = await fetch('/v1/client/usage/me', { headers: { 'X-API-Key': key } });
+      if (!r.ok) return;
+      const data = await r.json();
+      const pct  = Math.min((data.used_today / data.daily_limit) * 100, 100).toFixed(1);
+      const fill = document.getElementById('usage-fill');
+      fill.style.width = pct + '%';
+      fill.className   = 'usage-fill' + (pct >= 90 ? ' danger' : pct >= 70 ? ' warn' : '');
+      document.getElementById('usage-count').textContent =
+        data.remaining + ' remaining / ' + data.daily_limit;
+      document.getElementById('usage-bar').style.display = 'block';
+    } catch (e) {}
+  }
+
+  function onKeyInput() {
     const k      = document.getElementById('api-key-input').value.trim();
     const status = document.getElementById('key-status');
     if (k.startsWith('dt_')) {
       status.textContent = '✓ Key set';
       status.style.color = 'var(--real)';
+      loadUsage();
     } else if (k) {
       status.textContent = '⚠ Must start with dt_';
       status.style.color = 'var(--uncertain)';
+      document.getElementById('usage-bar').style.display = 'none';
     } else {
       status.textContent = '';
+      document.getElementById('usage-bar').style.display = 'none';
     }
   }
 
@@ -598,26 +649,21 @@ async def video_ui():
         });
       } catch(e) { setVerdict('wc','Camera Error',e.message,'UNCERTAIN'); return; }
     }
-
     const deviceId    = sel.value;
     if (currentStream) currentStream.getTracks().forEach(t => t.stop());
     const constraints = deviceId
       ? {video:{deviceId:{exact:deviceId},width:{ideal:1280},height:{ideal:720}}}
       : {video:{width:{ideal:1280},height:{ideal:720}}};
-
     try { currentStream = await navigator.mediaDevices.getUserMedia(constraints); }
     catch(e) { setVerdict('wc','Camera Error',e.message,'UNCERTAIN'); return; }
-
     document.getElementById('video').srcObject = currentStream;
     const track    = currentStream.getVideoTracks()[0];
     const settings = track.getSettings();
     const canvas   = document.getElementById('canvas');
     canvas.width   = settings.width  || 1280;
     canvas.height  = settings.height || 720;
-
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(wsProto + '//' + location.host + '/v1/video/ws');
-
     ws.onmessage = (e) => {
       const d = JSON.parse(e.data);
       if (d.status === 'prediction') {
@@ -641,7 +687,6 @@ async def video_ui():
       }
     };
     ws.onclose = () => setVerdict('wc','Disconnected','WebSocket closed','idle');
-
     const ctx = canvas.getContext('2d');
     const vid = document.getElementById('video');
     captureInterval = setInterval(() => {
@@ -649,7 +694,6 @@ async def video_ui():
       ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
       ws.send(canvas.toDataURL('image/jpeg', 0.85).split(',')[1]);
     }, 1000/15);
-
     document.getElementById('startBtn').textContent = '◼ Running';
   }
 
@@ -695,9 +739,9 @@ async def video_ui():
     const tbody = document.getElementById('seg-tbody');
     tbody.innerHTML = '';
     (data.segments||[]).forEach(s => {
-      const tr       = document.createElement('tr');
-      tr.className   = 'row-'+s.label.toLowerCase();
-      tr.innerHTML   = '<td>'+s.segment+'</td><td>'+s.start_sec+'s – '+s.end_sec+'s</td>'+
+      const tr     = document.createElement('tr');
+      tr.className = 'row-'+s.label.toLowerCase();
+      tr.innerHTML = '<td>'+s.segment+'</td><td>'+s.start_sec+'s – '+s.end_sec+'s</td>'+
         '<td><span class="pill '+s.label+'">'+s.label+'</span></td>'+
         '<td>'+s.confidence+'%</td><td>'+s.fake_prob+'</td>';
       tbody.appendChild(tr);
@@ -712,7 +756,7 @@ async def video_ui():
       await new Promise(r => setTimeout(r, interval));
       interval = Math.min(Math.floor(interval * 1.4), 6000);
       const resp = await fetch('/v1/video/jobs/' + jobId, {
-        headers: { 'X-API-Key': getKey() }  // key passed on every poll
+        headers: { 'X-API-Key': getKey() }
       });
       if (!resp.ok) throw new Error('Poll failed: ' + resp.statusText);
       const job = await resp.json();
@@ -726,7 +770,6 @@ async def video_ui():
 
   async function analyzeVideo() {
     if (!selectedFile) return;
-
     const key = getKey();
     if (!key) { alert('Please enter your API key above before analyzing.'); return; }
 
@@ -739,7 +782,6 @@ async def video_ui():
     document.getElementById('analyze-btn').disabled           = true;
 
     setVerdict('up','Uploading...','Sending file to server','idle');
-
     const formData = new FormData();
     formData.append('file', selectedFile);
 
@@ -755,6 +797,7 @@ async def video_ui():
       const result = await pollJob(data.job_id);
       document.getElementById('spinner').style.display = 'none';
       showResult(result);
+      loadUsage(); // refresh counter after job completes
     } catch(e) {
       document.getElementById('spinner').style.display = 'none';
       setVerdict('up','Failed', e.message,'UNCERTAIN');
