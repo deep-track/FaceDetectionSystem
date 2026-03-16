@@ -3,10 +3,11 @@ import logging
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from PIL import Image
-from core.auth import verify_api_key
+from core.auth import verify_api_key, increment_usage
 
 logger = logging.getLogger("deeptrack.image")
 router = APIRouter()
+
 
 @router.post("/predict")
 async def predict_image(
@@ -22,6 +23,7 @@ async def predict_image(
         image_bytes = await file.read()
         image       = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         result      = predictor.predict(image)
+        increment_usage(request)
         return {"filename": file.filename, **result}
     except Exception as e:
         raise HTTPException(400, f"Error processing image: {e}")
@@ -29,7 +31,6 @@ async def predict_image(
 
 @router.get("/", response_class=HTMLResponse)
 async def image_ui():
-    """DeepTrack image upload demo UI."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -47,8 +48,8 @@ async def image_ui():
        background-image:linear-gradient(rgba(232,255,71,.03)1px,transparent 1px),
          linear-gradient(90deg,rgba(232,255,71,.03)1px,transparent 1px);
        background-size:40px 40px}
-  header{width:100%;max-width:100%;margin-bottom:0;padding:20px 40px;
-         border-bottom:1px solid var(--border)}
+  header{width:100%;background:#0d1117;border-bottom:1px solid #1c2530;
+         padding:20px 40px}
   .header-inner{max-width:680px;margin:0 auto}
   .wordmark{font-family:'Syne',sans-serif;font-weight:800;
             font-size:clamp(2rem,5vw,2.8rem);letter-spacing:-.03em;line-height:1}
@@ -56,23 +57,37 @@ async def image_ui():
   .tagline{margin-top:8px;font-size:.72rem;letter-spacing:.18em;
            text-transform:uppercase;color:var(--muted)}
   .status-pill{display:inline-flex;align-items:center;gap:6px;margin-top:14px;
-               padding:4px 12px;border:1px solid var(--border);
+               padding:4px 12px;border:1px solid #222;
                font-size:.7rem;letter-spacing:.1em;color:var(--muted)}
   .status-pill::before{content:'';width:6px;height:6px;border-radius:50%;
     background:var(--real);box-shadow:0 0 6px var(--real);animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
   .key-bar{width:100%;background:#0d1117;border-bottom:1px solid #1c2530;
-           padding:10px 40px;display:flex;align-items:center;gap:12px}
-  .key-bar-inner{max-width:680px;width:100%;margin:0 auto;display:flex;align-items:center;gap:12px}
+           padding:10px 40px}
+  .key-bar-inner{max-width:680px;margin:0 auto;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
   .key-label{font-size:.65rem;letter-spacing:.14em;text-transform:uppercase;
              color:#4a6070;white-space:nowrap}
-  .key-input{flex:1;max-width:480px;background:#080b0f;border:1px solid #243040;
-             color:#c8d8e8;font-family:'DM Mono',monospace;font-size:12px;
-             padding:7px 12px;outline:none;transition:border-color .15s}
+  .key-input{flex:1;min-width:200px;max-width:400px;background:#080b0f;
+             border:1px solid #243040;color:#c8d8e8;font-family:'DM Mono',monospace;
+             font-size:12px;padding:7px 12px;outline:none;transition:border-color .15s}
   .key-input:focus{border-color:#e8ff47}
-  .key-status{font-size:.65rem;letter-spacing:.1em;color:#4a6070;text-transform:uppercase;
-              white-space:nowrap}
+  .key-status{font-size:.65rem;letter-spacing:.1em;color:#4a6070;
+              text-transform:uppercase;white-space:nowrap}
+
+  .usage-bar{width:100%;background:#0a0c10;border-bottom:1px solid #1c2530;
+             padding:8px 40px}
+  .usage-bar-inner{max-width:680px;margin:0 auto;display:flex;
+                   align-items:center;gap:12px}
+  .usage-label-txt{font-size:.65rem;letter-spacing:.12em;text-transform:uppercase;
+                   color:#4a6070;white-space:nowrap}
+  .usage-track{flex:1;height:4px;background:#1c2530;border-radius:2px;overflow:hidden}
+  .usage-fill{height:100%;border-radius:2px;background:#e8ff47;
+              transition:width .5s ease}
+  .usage-fill.warn{background:#ffaa00}
+  .usage-fill.danger{background:#ff4757}
+  .usage-count{font-size:.65rem;letter-spacing:.08em;color:#4a6070;
+               white-space:nowrap;min-width:90px;text-align:right}
 
   .content{width:100%;max-width:680px;padding:40px 24px 0}
   .card{width:100%;background:var(--surface);border:1px solid var(--border);padding:40px}
@@ -147,8 +162,18 @@ async def image_ui():
   <div class="key-bar-inner">
     <span class="key-label">API Key</span>
     <input type="password" id="api-key-input" class="key-input"
-           placeholder="dt_your_key_here" oninput="saveKey()">
+           placeholder="dt_your_key_here" oninput="onKeyInput()">
     <span class="key-status" id="key-status"></span>
+  </div>
+</div>
+
+<div class="usage-bar" id="usage-bar" style="display:none">
+  <div class="usage-bar-inner">
+    <span class="usage-label-txt">Daily Usage</span>
+    <div class="usage-track">
+      <div class="usage-fill" id="usage-fill" style="width:0%"></div>
+    </div>
+    <span class="usage-count" id="usage-count">— / —</span>
   </div>
 </div>
 
@@ -174,17 +199,39 @@ async def image_ui():
 <script>
   let pendingFiles = [];
 
-  function saveKey() {
-    const k = document.getElementById('api-key-input').value.trim();
+  // fetches /v1/client/usage/me and updates the usage bar
+  async function loadUsage() {
+    const key = getKey();
+    if (!key) return;
+    try {
+      const r    = await fetch('/v1/client/usage/me', { headers: { 'X-API-Key': key } });
+      if (!r.ok) return;
+      const data = await r.json();
+      const used  = data.used_today;
+      const limit = data.daily_limit;
+      const pct   = Math.min((used / limit) * 100, 100).toFixed(1);
+      const fill  = document.getElementById('usage-fill');
+      fill.style.width = pct + '%';
+      fill.className   = 'usage-fill' + (pct >= 90 ? ' danger' : pct >= 70 ? ' warn' : '');
+      document.getElementById('usage-count').textContent = data.remaining + ' remaining / ' + limit;
+      document.getElementById('usage-bar').style.display = 'block';
+    } catch (e) {}
+  }
+
+  function onKeyInput() {
+    const k      = document.getElementById('api-key-input').value.trim();
     const status = document.getElementById('key-status');
     if (k.startsWith('dt_')) {
       status.textContent = '✓ Key set';
       status.style.color = '#47ffa3';
+      loadUsage();
     } else if (k) {
       status.textContent = '⚠ Must start with dt_';
       status.style.color = '#ffaa00';
+      document.getElementById('usage-bar').style.display = 'none';
     } else {
       status.textContent = '';
+      document.getElementById('usage-bar').style.display = 'none';
     }
   }
 
@@ -232,7 +279,6 @@ async def image_ui():
 
   async function runAnalysis() {
     if (!pendingFiles.length) return;
-
     const key = getKey();
     if (!key) { alert('Please enter your API key above before analyzing.'); return; }
 
@@ -259,11 +305,11 @@ async def image_ui():
             `<div class="error-card"><strong>${esc(file.name)}</strong>${esc(data.detail || resp.statusText)}</div>`);
           continue;
         }
-        const verdict  = data.prediction.toUpperCase();
-        const realPct  = data.raw_scores.Real;
-        const fakePct  = data.raw_scores.Fake;
-        const conf     = data.confidence_percentage;
-        const card     = document.createElement('div');
+        const verdict = data.prediction.toUpperCase();
+        const realPct = data.raw_scores.Real;
+        const fakePct = data.raw_scores.Fake;
+        const conf    = data.confidence_percentage;
+        const card    = document.createElement('div');
         card.className = `result-card ${verdict}`;
         card.innerHTML = `<div class="result-inner">
           <img class="result-thumb" src="${thumbUrl}" alt="">
@@ -293,7 +339,10 @@ async def image_ui():
           `<div class="error-card"><strong>${esc(file.name)}</strong>${esc(err.message)}</div>`);
       }
     }
-    progress.classList.remove('visible'); btn.disabled = false;
+
+    progress.classList.remove('visible');
+    btn.disabled = false;
+    loadUsage(); // refresh counter after batch completes
   }
 </script>
 </body>
