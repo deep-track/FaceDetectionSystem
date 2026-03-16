@@ -12,7 +12,6 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from core.auth import verify_api_key
-from core.limiter import limiter, get_api_limit
 from core.video_predictor import (
     FrameBuffer, N_SUBREGIONS, OMEGA, FS,
     build_ppg_map, classify_prob, signal_quality,
@@ -30,10 +29,8 @@ video_executor = ThreadPoolExecutor(
     thread_name_prefix="deeptrack-video",
 )
 
-
 class FrameRequest(BaseModel):
     image: str  # base64-encoded JPEG
-
 
 def _purge_old_jobs(jobs: dict):
     cutoff = time.time() - JOB_TTL_SECONDS
@@ -65,17 +62,16 @@ def _run_video_job(job_id: str, tmp_path: str, predictor, jobs: dict):
                 time.sleep(0.2)
 
 
-'''
-protected endpoints, they require X-API-KEY to access
-'''
-
+# Protected endpoint, require api_key
 @router.post("/predict/video")
-@limiter.limit(get_api_limit)
 async def predict_video(
     request: Request,
     file: UploadFile = File(...),
     _key: dict = Depends(verify_api_key),
 ):
+    """
+    Predicts video real/fake probabilities and returns a score card
+    """
     predictor = request.app.state.video_predictor
     jobs      = request.app.state.jobs
     if predictor is None:
@@ -140,10 +136,8 @@ async def list_jobs(
         counts[j["status"]] = counts.get(j["status"], 0) + 1
     return {"jobs": summary, "counts": counts, "total": len(jobs)}
 
-'''
-open endpoints, don't require keys
-'''
 
+# Open endpoints, no key required (demo UI, WebSocket, reset)
 @router.post("/predict/frame")
 async def predict_frame(req: FrameRequest, request: Request):
     predictor = request.app.state.video_predictor
@@ -286,6 +280,24 @@ async def video_ui():
       border: 1px solid var(--border2); border-radius: 3px; padding: 3px 8px;
       letter-spacing: 0.1em; text-transform: uppercase;
     }
+    .key-bar {
+      width: 100%; background: #0a0e13; border-bottom: 1px solid var(--border);
+      padding: 10px 40px; display: flex; align-items: center; gap: 12px;
+    }
+    .key-label {
+      font-family: var(--mono); font-size: .65rem; letter-spacing: .14em;
+      text-transform: uppercase; color: var(--muted); white-space: nowrap;
+    }
+    .key-input {
+      flex: 1; max-width: 480px; background: var(--bg); border: 1px solid var(--border2);
+      color: var(--text); font-family: var(--mono); font-size: 12px;
+      padding: 7px 12px; outline: none; transition: border-color .15s;
+    }
+    .key-input:focus { border-color: var(--accent); }
+    .key-status {
+      font-family: var(--mono); font-size: .65rem; letter-spacing: .1em;
+      text-transform: uppercase; white-space: nowrap;
+    }
     main { width: 100%; max-width: 860px; padding: 32px 20px 0; }
     .page-title { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 24px; }
     .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 28px; }
@@ -380,17 +392,27 @@ async def video_ui():
   </style>
 </head>
 <body>
+
 <header>
   <div class="logo-mark">DT</div>
   <div class="logo-text">Deep<span>Track</span></div>
   <div class="header-badge">rPPG Engine v1</div>
 </header>
+
+<div class="key-bar">
+  <span class="key-label">API Key</span>
+  <input type="password" id="api-key-input" class="key-input"
+         placeholder="dt_your_key_here" oninput="saveKey()">
+  <span class="key-status" id="key-status"></span>
+</div>
+
 <main>
   <div class="page-title">// Video Analysis</div>
   <div class="tabs">
     <button class="tab-btn active" onclick="switchTab('webcam', this)">Live Webcam</button>
     <button class="tab-btn"        onclick="switchTab('upload', this)">Upload Video</button>
   </div>
+
   <div class="tab-panel active" id="tab-webcam">
     <div class="card">
       <div class="card-label">Camera Input</div>
@@ -439,6 +461,7 @@ async def video_ui():
       <p class="tip"><strong>Tip:</strong> For deepfake filter testing, select OBS Virtual Camera with DeepFaceLive running.</p>
     </div>
   </div>
+
   <div class="tab-panel" id="tab-upload">
     <div class="card">
       <div class="card-label">Video File</div>
@@ -491,182 +514,253 @@ async def video_ui():
     </div>
   </div>
 </main>
+
 <canvas id="canvas" width="480" height="360" style="display:none"></canvas>
+
 <script>
+  function saveKey() {
+    const k      = document.getElementById('api-key-input').value.trim();
+    const status = document.getElementById('key-status');
+    if (k.startsWith('dt_')) {
+      status.textContent = '✓ Key set';
+      status.style.color = 'var(--real)';
+    } else if (k) {
+      status.textContent = '⚠ Must start with dt_';
+      status.style.color = 'var(--uncertain)';
+    } else {
+      status.textContent = '';
+    }
+  }
+
+  function getKey() {
+    return document.getElementById('api-key-input').value.trim();
+  }
+
   function switchTab(name, btn) {
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.getElementById('tab-' + name).classList.add('active');
     btn.classList.add('active');
   }
+
   const ICONS = { REAL: '✓', FAKE: '✕', UNCERTAIN: '?', idle: '⬡' };
+
   function setVerdict(prefix, label, sub, state) {
-    document.getElementById(prefix+'-verdict-icon').className   = 'verdict-icon '+state;
-    document.getElementById(prefix+'-verdict-icon').textContent = ICONS[state]||'⬡';
-    document.getElementById(prefix+'-verdict-label').className  = 'verdict-label '+state;
+    document.getElementById(prefix+'-verdict-icon').className    = 'verdict-icon '+state;
+    document.getElementById(prefix+'-verdict-icon').textContent  = ICONS[state]||'⬡';
+    document.getElementById(prefix+'-verdict-label').className   = 'verdict-label '+state;
     document.getElementById(prefix+'-verdict-label').textContent = label;
-    document.getElementById(prefix+'-verdict-sub').textContent  = sub;
+    document.getElementById(prefix+'-verdict-sub').textContent   = sub;
   }
+
   function updateProbs(prefix, fakeProb) {
-    const realPct=((1-fakeProb)*100).toFixed(1), fakePct=(fakeProb*100).toFixed(1);
-    document.getElementById(prefix+'-probs').style.display    = 'block';
-    document.getElementById(prefix+'-real-fill').style.width  = realPct+'%';
-    document.getElementById(prefix+'-real-pct').textContent   = realPct+'%';
-    document.getElementById(prefix+'-fake-fill').style.width  = fakePct+'%';
-    document.getElementById(prefix+'-fake-pct').textContent   = fakePct+'%';
+    const realPct = ((1-fakeProb)*100).toFixed(1);
+    const fakePct = (fakeProb*100).toFixed(1);
+    document.getElementById(prefix+'-probs').style.display   = 'block';
+    document.getElementById(prefix+'-real-fill').style.width = realPct+'%';
+    document.getElementById(prefix+'-real-pct').textContent  = realPct+'%';
+    document.getElementById(prefix+'-fake-fill').style.width = fakePct+'%';
+    document.getElementById(prefix+'-fake-pct').textContent  = fakePct+'%';
   }
+
   let ws, captureInterval, currentStream = null;
+
   async function refreshCameras() {
-    try { const tmp=await navigator.mediaDevices.getUserMedia({video:true}); tmp.getTracks().forEach(t=>t.stop()); } catch(e){}
-    const devices=await navigator.mediaDevices.enumerateDevices();
-    const cameras=devices.filter(d=>d.kind==='videoinput');
-    const sel=document.getElementById('cam-sel');
-    sel.innerHTML='';
-    cameras.forEach((cam,idx)=>{
-      const opt=document.createElement('option');
-      opt.value=cam.deviceId; opt.textContent=cam.label||('Camera '+(idx+1));
-      if(cam.label&&cam.label.toLowerCase().includes('obs')) opt.selected=true;
+    try { const tmp = await navigator.mediaDevices.getUserMedia({video:true}); tmp.getTracks().forEach(t=>t.stop()); } catch(e){}
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cameras = devices.filter(d => d.kind==='videoinput');
+    const sel     = document.getElementById('cam-sel');
+    sel.innerHTML = '';
+    cameras.forEach((cam, idx) => {
+      const opt       = document.createElement('option');
+      opt.value       = cam.deviceId;
+      opt.textContent = cam.label || ('Camera '+(idx+1));
+      if (cam.label && cam.label.toLowerCase().includes('obs')) opt.selected = true;
       sel.appendChild(opt);
     });
   }
+
   async function startCapture() {
-    const sel=document.getElementById('cam-sel');
-    if(!sel.value||sel.options[0]?.value===''){
+    const sel = document.getElementById('cam-sel');
+    if (!sel.value || sel.options[0]?.value === '') {
       try {
-        const tmp=await navigator.mediaDevices.getUserMedia({video:true}); tmp.getTracks().forEach(t=>t.stop());
-        const devices=await navigator.mediaDevices.enumerateDevices();
-        const cameras=devices.filter(d=>d.kind==='videoinput');
-        sel.innerHTML='';
-        cameras.forEach((cam,idx)=>{
-          const opt=document.createElement('option');
-          opt.value=cam.deviceId; opt.textContent=cam.label||('Camera '+(idx+1));
-          if(cam.label&&cam.label.toLowerCase().includes('obs')) opt.selected=true;
+        const tmp     = await navigator.mediaDevices.getUserMedia({video:true});
+        tmp.getTracks().forEach(t => t.stop());
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cameras = devices.filter(d => d.kind==='videoinput');
+        sel.innerHTML = '';
+        cameras.forEach((cam, idx) => {
+          const opt       = document.createElement('option');
+          opt.value       = cam.deviceId;
+          opt.textContent = cam.label || ('Camera '+(idx+1));
+          if (cam.label && cam.label.toLowerCase().includes('obs')) opt.selected = true;
           sel.appendChild(opt);
         });
-      } catch(e){ setVerdict('wc','Camera Error',e.message,'UNCERTAIN'); return; }
+      } catch(e) { setVerdict('wc','Camera Error',e.message,'UNCERTAIN'); return; }
     }
-    const deviceId=sel.value;
-    if(currentStream) currentStream.getTracks().forEach(t=>t.stop());
-    const constraints=deviceId?{video:{deviceId:{exact:deviceId},width:{ideal:1280},height:{ideal:720}}}:{video:{width:{ideal:1280},height:{ideal:720}}};
-    try { currentStream=await navigator.mediaDevices.getUserMedia(constraints); }
-    catch(e){ setVerdict('wc','Camera Error',e.message,'UNCERTAIN'); return; }
-    document.getElementById('video').srcObject=currentStream;
-    const track=currentStream.getVideoTracks()[0];
-    const settings=track.getSettings();
-    const canvas=document.getElementById('canvas');
-    canvas.width=settings.width||1280; canvas.height=settings.height||720;
-    const wsProto=location.protocol==='https:'?'wss:':'ws:';
-    ws=new WebSocket(wsProto+'//'+location.host+'/v1/video/ws');
-    ws.onmessage=(e)=>{
-      const d=JSON.parse(e.data);
-      if(d.status==='prediction'){
-        if(d.label==='UNCERTAIN'){
-          setVerdict('wc','UNCERTAIN',d.warning||'Signal quality too low','UNCERTAIN');
-          document.getElementById('wc-probs').style.display='none';
+
+    const deviceId    = sel.value;
+    if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+    const constraints = deviceId
+      ? {video:{deviceId:{exact:deviceId},width:{ideal:1280},height:{ideal:720}}}
+      : {video:{width:{ideal:1280},height:{ideal:720}}};
+
+    try { currentStream = await navigator.mediaDevices.getUserMedia(constraints); }
+    catch(e) { setVerdict('wc','Camera Error',e.message,'UNCERTAIN'); return; }
+
+    document.getElementById('video').srcObject = currentStream;
+    const track    = currentStream.getVideoTracks()[0];
+    const settings = track.getSettings();
+    const canvas   = document.getElementById('canvas');
+    canvas.width   = settings.width  || 1280;
+    canvas.height  = settings.height || 720;
+
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(wsProto + '//' + location.host + '/v1/video/ws');
+
+    ws.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.status === 'prediction') {
+        if (d.label === 'UNCERTAIN') {
+          setVerdict('wc','UNCERTAIN', d.warning||'Signal quality too low','UNCERTAIN');
+          document.getElementById('wc-probs').style.display = 'none';
         } else {
-          setVerdict('wc',d.label,d.confidence+'% confidence',d.label);
-          updateProbs('wc',d.fake_prob);
+          setVerdict('wc', d.label, d.confidence+'% confidence', d.label);
+          updateProbs('wc', d.fake_prob);
         }
-        document.getElementById('wc-buf-fill').style.width='100%';
-        document.getElementById('wc-buf-pct').textContent='100%';
-        document.getElementById('wc-meta').style.display='flex';
-        document.getElementById('wc-frames').textContent=d.frames_seen;
-        document.getElementById('wc-pfake').textContent=d.fake_prob;
-        document.getElementById('wc-segs').textContent=d.segments_seen;
+        document.getElementById('wc-buf-fill').style.width = '100%';
+        document.getElementById('wc-buf-pct').textContent  = '100%';
+        document.getElementById('wc-meta').style.display   = 'flex';
+        document.getElementById('wc-frames').textContent   = d.frames_seen;
+        document.getElementById('wc-pfake').textContent    = d.fake_prob;
+        document.getElementById('wc-segs').textContent     = d.segments_seen;
       } else {
         setVerdict('wc','Buffering...','Collecting signal — hold still','idle');
-        document.getElementById('wc-buf-fill').style.width=d.fill_pct+'%';
-        document.getElementById('wc-buf-pct').textContent=d.fill_pct+'%';
+        document.getElementById('wc-buf-fill').style.width = d.fill_pct+'%';
+        document.getElementById('wc-buf-pct').textContent  = d.fill_pct+'%';
       }
     };
-    ws.onclose=()=>setVerdict('wc','Disconnected','WebSocket closed','idle');
-    const ctx=canvas.getContext('2d'); const vid=document.getElementById('video');
-    captureInterval=setInterval(()=>{
-      if(ws.readyState!==WebSocket.OPEN) return;
-      ctx.drawImage(vid,0,0,canvas.width,canvas.height);
-      ws.send(canvas.toDataURL('image/jpeg',0.85).split(',')[1]);
-    },1000/15);
-    document.getElementById('startBtn').textContent='◼ Running';
+    ws.onclose = () => setVerdict('wc','Disconnected','WebSocket closed','idle');
+
+    const ctx = canvas.getContext('2d');
+    const vid = document.getElementById('video');
+    captureInterval = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+      ws.send(canvas.toDataURL('image/jpeg', 0.85).split(',')[1]);
+    }, 1000/15);
+
+    document.getElementById('startBtn').textContent = '◼ Running';
   }
+
   async function resetBuffer() {
-    if(captureInterval) clearInterval(captureInterval);
-    if(ws) ws.close();
-    await fetch('/v1/video/reset',{method:'POST'});
+    if (captureInterval) clearInterval(captureInterval);
+    if (ws) ws.close();
+    await fetch('/v1/video/reset', {method:'POST'});
     setVerdict('wc','Awaiting signal','Select a camera and press Start','idle');
-    document.getElementById('wc-buf-fill').style.width='0%';
-    document.getElementById('wc-buf-pct').textContent='0%';
-    document.getElementById('wc-probs').style.display='none';
-    document.getElementById('wc-meta').style.display='none';
-    document.getElementById('startBtn').textContent='▶ Start';
+    document.getElementById('wc-buf-fill').style.width = '0%';
+    document.getElementById('wc-buf-pct').textContent  = '0%';
+    document.getElementById('wc-probs').style.display  = 'none';
+    document.getElementById('wc-meta').style.display   = 'none';
+    document.getElementById('startBtn').textContent    = '▶ Start';
   }
-  let selectedFile=null;
-  function onFileSelected(file){
-    if(!file) return;
-    selectedFile=file;
-    document.getElementById('file-name').textContent=file.name+'  ('+(file.size/1024/1024).toFixed(1)+' MB)';
-    document.getElementById('analyze-btn').disabled=false;
-    document.getElementById('up-result-card').style.display='none';
+
+  let selectedFile = null;
+
+  function onFileSelected(file) {
+    if (!file) return;
+    selectedFile = file;
+    document.getElementById('file-name').textContent = file.name+'  ('+(file.size/1024/1024).toFixed(1)+' MB)';
+    document.getElementById('analyze-btn').disabled  = false;
+    document.getElementById('up-result-card').style.display = 'none';
   }
-  function onDragOver(e){e.preventDefault();document.getElementById('drop-zone').classList.add('dragover');}
-  function onDragLeave(){document.getElementById('drop-zone').classList.remove('dragover');}
-  function onDrop(e){e.preventDefault();document.getElementById('drop-zone').classList.remove('dragover');if(e.dataTransfer.files[0])onFileSelected(e.dataTransfer.files[0]);}
-  function showResult(data){
-    document.getElementById('up-verdict-block').style.display='flex';
-    setVerdict('up',data.label,data.confidence+'% confidence',data.label);
-    updateProbs('up',data.fake_prob);
-    document.getElementById('up-meta').style.display='flex';
-    document.getElementById('up-segs').textContent=data.n_segments;
-    document.getElementById('up-frames').textContent=data.total_frames;
-    document.getElementById('up-face').textContent=data.face_pct+'%';
-    document.getElementById('up-pfake').textContent=data.fake_prob;
-    const tbody=document.getElementById('seg-tbody'); tbody.innerHTML='';
-    (data.segments||[]).forEach(s=>{
-      const tr=document.createElement('tr'); tr.className='row-'+s.label.toLowerCase();
-      tr.innerHTML='<td>'+s.segment+'</td><td>'+s.start_sec+'s – '+s.end_sec+'s</td>'+
+
+  function onDragOver(e)  { e.preventDefault(); document.getElementById('drop-zone').classList.add('dragover'); }
+  function onDragLeave()  { document.getElementById('drop-zone').classList.remove('dragover'); }
+  function onDrop(e) {
+    e.preventDefault();
+    document.getElementById('drop-zone').classList.remove('dragover');
+    if (e.dataTransfer.files[0]) onFileSelected(e.dataTransfer.files[0]);
+  }
+
+  function showResult(data) {
+    document.getElementById('up-verdict-block').style.display = 'flex';
+    setVerdict('up', data.label, data.confidence+'% confidence', data.label);
+    updateProbs('up', data.fake_prob);
+    document.getElementById('up-meta').style.display  = 'flex';
+    document.getElementById('up-segs').textContent    = data.n_segments;
+    document.getElementById('up-frames').textContent  = data.total_frames;
+    document.getElementById('up-face').textContent    = data.face_pct+'%';
+    document.getElementById('up-pfake').textContent   = data.fake_prob;
+    const tbody = document.getElementById('seg-tbody');
+    tbody.innerHTML = '';
+    (data.segments||[]).forEach(s => {
+      const tr       = document.createElement('tr');
+      tr.className   = 'row-'+s.label.toLowerCase();
+      tr.innerHTML   = '<td>'+s.segment+'</td><td>'+s.start_sec+'s – '+s.end_sec+'s</td>'+
         '<td><span class="pill '+s.label+'">'+s.label+'</span></td>'+
         '<td>'+s.confidence+'%</td><td>'+s.fake_prob+'</td>';
       tbody.appendChild(tr);
     });
-    document.getElementById('seg-section').style.display='block';
+    document.getElementById('seg-section').style.display = 'block';
   }
-  async function pollJob(jobId){
-    const MAX_POLLS=120; let interval=1500;
-    for(let i=0;i<MAX_POLLS;i++){
-      await new Promise(r=>setTimeout(r,interval));
-      interval=Math.min(Math.floor(interval*1.4),6000);
-      const resp=await fetch('/v1/video/jobs/'+jobId);
-      if(!resp.ok) throw new Error('Poll failed: '+resp.statusText);
-      const job=await resp.json();
-      if(job.status==='queued') setVerdict('up','Queued','Waiting for worker...','idle');
-      else if(job.status==='processing') setVerdict('up','Processing','Analysing rPPG signal...','idle');
-      if(job.status==='done') return job.result;
-      if(job.status==='error') throw new Error(job.error||'Job failed');
+
+  async function pollJob(jobId) {
+    const MAX_POLLS = 120;
+    let interval    = 1500;
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise(r => setTimeout(r, interval));
+      interval = Math.min(Math.floor(interval * 1.4), 6000);
+      const resp = await fetch('/v1/video/jobs/' + jobId, {
+        headers: { 'X-API-Key': getKey() }  // key passed on every poll
+      });
+      if (!resp.ok) throw new Error('Poll failed: ' + resp.statusText);
+      const job = await resp.json();
+      if (job.status === 'queued')     setVerdict('up','Queued','Waiting for worker...','idle');
+      if (job.status === 'processing') setVerdict('up','Processing','Analysing rPPG signal...','idle');
+      if (job.status === 'done')       return job.result;
+      if (job.status === 'error')      throw new Error(job.error || 'Job failed');
     }
     throw new Error('Timed out waiting for result');
   }
-  async function analyzeVideo(){
-    if(!selectedFile) return;
-    document.getElementById('up-result-card').style.display='block';
-    document.getElementById('spinner').style.display='block';
-    document.getElementById('up-verdict-block').style.display='flex';
-    document.getElementById('up-probs').style.display='none';
-    document.getElementById('up-meta').style.display='none';
-    document.getElementById('seg-section').style.display='none';
-    document.getElementById('analyze-btn').disabled=true;
+
+  async function analyzeVideo() {
+    if (!selectedFile) return;
+
+    const key = getKey();
+    if (!key) { alert('Please enter your API key above before analyzing.'); return; }
+
+    document.getElementById('up-result-card').style.display   = 'block';
+    document.getElementById('spinner').style.display          = 'block';
+    document.getElementById('up-verdict-block').style.display = 'flex';
+    document.getElementById('up-probs').style.display         = 'none';
+    document.getElementById('up-meta').style.display          = 'none';
+    document.getElementById('seg-section').style.display      = 'none';
+    document.getElementById('analyze-btn').disabled           = true;
+
     setVerdict('up','Uploading...','Sending file to server','idle');
-    const formData=new FormData(); formData.append('file',selectedFile);
-    try{
-      const resp=await fetch('/v1/video/predict/video',{method:'POST',body:formData});
-      const data=await resp.json();
-      if(!resp.ok){ setVerdict('up','Error',data.detail||resp.statusText,'UNCERTAIN'); return; }
+
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+
+    try {
+      const resp = await fetch('/v1/video/predict/video', {
+        method:  'POST',
+        headers: { 'X-API-Key': key },
+        body:    formData,
+      });
+      const data = await resp.json();
+      if (!resp.ok) { setVerdict('up','Error', data.detail||resp.statusText,'UNCERTAIN'); return; }
       setVerdict('up','Queued','Waiting for worker...','idle');
-      const result=await pollJob(data.job_id);
-      document.getElementById('spinner').style.display='none';
+      const result = await pollJob(data.job_id);
+      document.getElementById('spinner').style.display = 'none';
       showResult(result);
-    } catch(e){
-      document.getElementById('spinner').style.display='none';
-      setVerdict('up','Failed',e.message,'UNCERTAIN');
-    } finally { document.getElementById('analyze-btn').disabled=false; }
+    } catch(e) {
+      document.getElementById('spinner').style.display = 'none';
+      setVerdict('up','Failed', e.message,'UNCERTAIN');
+    } finally {
+      document.getElementById('analyze-btn').disabled = false;
+    }
   }
 </script>
 </body>
