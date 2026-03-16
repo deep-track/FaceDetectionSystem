@@ -3,16 +3,12 @@ import logging
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from PIL import Image
-
 from core.auth import verify_api_key
-from core.limiter import limiter, get_api_limit
 
 logger = logging.getLogger("deeptrack.image")
 router = APIRouter()
 
-
 @router.post("/predict")
-@limiter.limit(get_api_limit)
 async def predict_image(
     request: Request,
     file: UploadFile = File(...),
@@ -47,24 +43,39 @@ async def image_ui():
         --text:#f0f0f0;--muted:#555;--real:#47ffa3;--fake:#ff4757}
   body{background:var(--bg);color:var(--text);font-family:'DM Mono',monospace;
        min-height:100vh;display:flex;flex-direction:column;align-items:center;
-       padding:48px 24px 80px;
+       padding:0 0 80px;
        background-image:linear-gradient(rgba(232,255,71,.03)1px,transparent 1px),
          linear-gradient(90deg,rgba(232,255,71,.03)1px,transparent 1px);
        background-size:40px 40px}
-  header{width:100%;max-width:680px;margin-bottom:52px}
+  header{width:100%;max-width:100%;margin-bottom:0;padding:20px 40px;
+         border-bottom:1px solid var(--border)}
+  .header-inner{max-width:680px;margin:0 auto}
   .wordmark{font-family:'Syne',sans-serif;font-weight:800;
-            font-size:clamp(2.4rem,6vw,3.6rem);letter-spacing:-.03em;line-height:1}
+            font-size:clamp(2rem,5vw,2.8rem);letter-spacing:-.03em;line-height:1}
   .wordmark span{color:var(--accent)}
-  .tagline{margin-top:10px;font-size:.72rem;letter-spacing:.18em;
+  .tagline{margin-top:8px;font-size:.72rem;letter-spacing:.18em;
            text-transform:uppercase;color:var(--muted)}
-  .status-pill{display:inline-flex;align-items:center;gap:6px;margin-top:18px;
+  .status-pill{display:inline-flex;align-items:center;gap:6px;margin-top:14px;
                padding:4px 12px;border:1px solid var(--border);
                font-size:.7rem;letter-spacing:.1em;color:var(--muted)}
   .status-pill::before{content:'';width:6px;height:6px;border-radius:50%;
     background:var(--real);box-shadow:0 0 6px var(--real);animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-  .card{width:100%;max-width:680px;background:var(--surface);
-        border:1px solid var(--border);padding:40px}
+
+  .key-bar{width:100%;background:#0d1117;border-bottom:1px solid #1c2530;
+           padding:10px 40px;display:flex;align-items:center;gap:12px}
+  .key-bar-inner{max-width:680px;width:100%;margin:0 auto;display:flex;align-items:center;gap:12px}
+  .key-label{font-size:.65rem;letter-spacing:.14em;text-transform:uppercase;
+             color:#4a6070;white-space:nowrap}
+  .key-input{flex:1;max-width:480px;background:#080b0f;border:1px solid #243040;
+             color:#c8d8e8;font-family:'DM Mono',monospace;font-size:12px;
+             padding:7px 12px;outline:none;transition:border-color .15s}
+  .key-input:focus{border-color:#e8ff47}
+  .key-status{font-size:.65rem;letter-spacing:.1em;color:#4a6070;text-transform:uppercase;
+              white-space:nowrap}
+
+  .content{width:100%;max-width:680px;padding:40px 24px 0}
+  .card{width:100%;background:var(--surface);border:1px solid var(--border);padding:40px}
   .drop-zone{border:1.5px dashed var(--border);padding:52px 24px;text-align:center;
              cursor:pointer;transition:border-color .2s,background .2s}
   .drop-zone:hover,.drop-zone.over{border-color:var(--accent);background:rgba(232,255,71,.03)}
@@ -89,7 +100,7 @@ async def image_ui():
                transition:opacity .15s,transform .1s}
   .btn-analyze:hover:not(:disabled){opacity:.88;transform:translateY(-1px)}
   .btn-analyze:disabled{opacity:.25;cursor:not-allowed;transform:none}
-  #results{width:100%;max-width:680px;margin-top:24px}
+  #results{width:100%;max-width:680px;padding:0 24px;margin-top:24px}
   .result-card{background:var(--surface);border:1px solid var(--border);
                border-left:3px solid var(--muted);margin-bottom:12px;overflow:hidden;
                animation:slideIn .25s ease}
@@ -123,85 +134,138 @@ async def image_ui():
 </style>
 </head>
 <body>
+
 <header>
-  <div class="wordmark">Deep<span>Track</span></div>
-  <div class="tagline">Swin Transformer &nbsp;·&nbsp; Image Authenticity Analysis</div>
-  <div class="status-pill">MODEL ONLINE &nbsp;·&nbsp; /v1/image/predict</div>
-</header>
-<div class="card">
-  <div class="drop-zone" id="dropZone"
-       ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)"
-       onclick="document.getElementById('fileInput').click()">
-    <input type="file" id="fileInput" accept="image/*" multiple onchange="onFiles(this.files)">
-    <span class="drop-icon">⬡</span>
-    <div class="drop-label">Drop images or click to browse</div>
-    <div class="drop-sub">JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; BMP &nbsp;|&nbsp; Multiple files supported</div>
+  <div class="header-inner">
+    <div class="wordmark">Deep<span>Track</span></div>
+    <div class="tagline">Swin Transformer &nbsp;·&nbsp; Image Authenticity Analysis</div>
+    <div class="status-pill">MODEL ONLINE &nbsp;·&nbsp; /v1/image/predict</div>
   </div>
-  <div class="preview-strip" id="previewStrip"></div>
-  <div class="progress-wrap" id="progressWrap"><div class="progress-bar"></div></div>
-  <button class="btn-analyze" id="analyzeBtn" disabled onclick="runAnalysis()">Analyze Images</button>
+</header>
+
+<div class="key-bar">
+  <div class="key-bar-inner">
+    <span class="key-label">API Key</span>
+    <input type="password" id="api-key-input" class="key-input"
+           placeholder="dt_your_key_here" oninput="saveKey()">
+    <span class="key-status" id="key-status"></span>
+  </div>
 </div>
+
+<div class="content">
+  <div class="card">
+    <div class="drop-zone" id="dropZone"
+         ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)"
+         onclick="document.getElementById('fileInput').click()">
+      <input type="file" id="fileInput" accept="image/*" multiple onchange="onFiles(this.files)">
+      <span class="drop-icon">⬡</span>
+      <div class="drop-label">Drop images or click to browse</div>
+      <div class="drop-sub">JPG &nbsp;·&nbsp; PNG &nbsp;·&nbsp; WEBP &nbsp;·&nbsp; BMP &nbsp;|&nbsp; Multiple files supported</div>
+    </div>
+    <div class="preview-strip" id="previewStrip"></div>
+    <div class="progress-wrap" id="progressWrap"><div class="progress-bar"></div></div>
+    <button class="btn-analyze" id="analyzeBtn" disabled onclick="runAnalysis()">Analyze Images</button>
+  </div>
+</div>
+
 <div id="results"></div>
 <footer>DeepTrack &nbsp;·&nbsp; Swin-T deepfake classifier &nbsp;·&nbsp; internal build</footer>
+
 <script>
-  let pendingFiles=[];
+  let pendingFiles = [];
+
+  function saveKey() {
+    const k = document.getElementById('api-key-input').value.trim();
+    const status = document.getElementById('key-status');
+    if (k.startsWith('dt_')) {
+      status.textContent = '✓ Key set';
+      status.style.color = '#47ffa3';
+    } else if (k) {
+      status.textContent = '⚠ Must start with dt_';
+      status.style.color = '#ffaa00';
+    } else {
+      status.textContent = '';
+    }
+  }
+
+  function getKey() {
+    return document.getElementById('api-key-input').value.trim();
+  }
+
   function onDragOver(e){e.preventDefault();document.getElementById('dropZone').classList.add('over')}
   function onDragLeave(){document.getElementById('dropZone').classList.remove('over')}
   function onDrop(e){e.preventDefault();document.getElementById('dropZone').classList.remove('over');onFiles(e.dataTransfer.files)}
-  function onFiles(fileList){
-    const valid=['image/jpeg','image/png','image/webp','image/bmp','image/gif'];
-    for(const f of fileList)if(valid.includes(f.type))pendingFiles.push(f);
+
+  function onFiles(fileList) {
+    const valid = ['image/jpeg','image/png','image/webp','image/bmp','image/gif'];
+    for (const f of fileList) if (valid.includes(f.type)) pendingFiles.push(f);
     renderPreviews();
   }
-  function renderPreviews(){
-    const strip=document.getElementById('previewStrip');
-    strip.innerHTML='';
-    if(!pendingFiles.length){
+
+  function renderPreviews() {
+    const strip = document.getElementById('previewStrip');
+    strip.innerHTML = '';
+    if (!pendingFiles.length) {
       strip.classList.remove('visible');
-      document.getElementById('analyzeBtn').disabled=true;
-      document.querySelector('.drop-label').textContent='Drop images or click to browse';
+      document.getElementById('analyzeBtn').disabled = true;
+      document.querySelector('.drop-label').textContent = 'Drop images or click to browse';
       return;
     }
     strip.classList.add('visible');
-    document.getElementById('analyzeBtn').disabled=false;
-    document.querySelector('.drop-label').textContent=
-      pendingFiles.length===1?'1 image selected':`${pendingFiles.length} images selected`;
-    pendingFiles.forEach((f,idx)=>{
-      const url=URL.createObjectURL(f);
-      const wrap=document.createElement('div');
-      wrap.className='thumb-wrap';
-      wrap.innerHTML=`<img src="${url}"><button class="thumb-remove" onclick="removeFile(${idx},event)">&#x2715;</button>`;
+    document.getElementById('analyzeBtn').disabled = false;
+    document.querySelector('.drop-label').textContent =
+      pendingFiles.length === 1 ? '1 image selected' : `${pendingFiles.length} images selected`;
+    pendingFiles.forEach((f, idx) => {
+      const url  = URL.createObjectURL(f);
+      const wrap = document.createElement('div');
+      wrap.className = 'thumb-wrap';
+      wrap.innerHTML = `<img src="${url}"><button class="thumb-remove" onclick="removeFile(${idx},event)">&#x2715;</button>`;
       strip.appendChild(wrap);
     });
   }
-  function removeFile(idx,e){e.stopPropagation();pendingFiles.splice(idx,1);renderPreviews()}
-  let _uid=0;const _idMap=new WeakMap();
-  function uid(f){if(!_idMap.has(f))_idMap.set(f,++_uid);return _idMap.get(f)}
-  function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
-  async function runAnalysis(){
-    if(!pendingFiles.length)return;
-    const btn=document.getElementById('analyzeBtn');
-    const progress=document.getElementById('progressWrap');
-    const results=document.getElementById('results');
-    btn.disabled=true;progress.classList.add('visible');results.innerHTML='';
-    const batch=[...pendingFiles];pendingFiles=[];renderPreviews();
-    for(const file of batch){
-      const thumbUrl=URL.createObjectURL(file);
-      const id=uid(file);
-      const fd=new FormData();fd.append('file',file);
-      try{
-        const resp=await fetch('/v1/image/predict',{method:'POST',body:fd});
-        const data=await resp.json();
-        if(!resp.ok){
+
+  function removeFile(idx, e) { e.stopPropagation(); pendingFiles.splice(idx, 1); renderPreviews(); }
+
+  let _uid = 0; const _idMap = new WeakMap();
+  function uid(f) { if (!_idMap.has(f)) _idMap.set(f, ++_uid); return _idMap.get(f); }
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  async function runAnalysis() {
+    if (!pendingFiles.length) return;
+
+    const key = getKey();
+    if (!key) { alert('Please enter your API key above before analyzing.'); return; }
+
+    const btn      = document.getElementById('analyzeBtn');
+    const progress = document.getElementById('progressWrap');
+    const results  = document.getElementById('results');
+    btn.disabled = true; progress.classList.add('visible'); results.innerHTML = '';
+
+    const batch = [...pendingFiles]; pendingFiles = []; renderPreviews();
+
+    for (const file of batch) {
+      const thumbUrl = URL.createObjectURL(file);
+      const id       = uid(file);
+      const fd       = new FormData(); fd.append('file', file);
+      try {
+        const resp = await fetch('/v1/image/predict', {
+          method:  'POST',
+          headers: { 'X-API-Key': key },
+          body:    fd,
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
           results.insertAdjacentHTML('beforeend',
-            `<div class="error-card"><strong>${esc(file.name)}</strong>${esc(data.detail||resp.statusText)}</div>`);
+            `<div class="error-card"><strong>${esc(file.name)}</strong>${esc(data.detail || resp.statusText)}</div>`);
           continue;
         }
-        const verdict=data.prediction.toUpperCase();
-        const realPct=data.raw_scores.Real,fakePct=data.raw_scores.Fake,conf=data.confidence_percentage;
-        const card=document.createElement('div');
-        card.className=`result-card ${verdict}`;
-        card.innerHTML=`<div class="result-inner">
+        const verdict  = data.prediction.toUpperCase();
+        const realPct  = data.raw_scores.Real;
+        const fakePct  = data.raw_scores.Fake;
+        const conf     = data.confidence_percentage;
+        const card     = document.createElement('div');
+        card.className = `result-card ${verdict}`;
+        card.innerHTML = `<div class="result-inner">
           <img class="result-thumb" src="${thumbUrl}" alt="">
           <div class="result-body">
             <div class="result-filename">${esc(file.name)}</div>
@@ -218,17 +282,18 @@ async def image_ui():
             <div class="conf-label">confidence</div>
           </div></div>`;
         results.appendChild(card);
-        requestAnimationFrame(()=>requestAnimationFrame(()=>{
-          const r=document.getElementById(`r${id}`);
-          const f=document.getElementById(`f${id}`);
-          if(r)r.style.width=realPct+'%';if(f)f.style.width=fakePct+'%';
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const r = document.getElementById(`r${id}`);
+          const f = document.getElementById(`f${id}`);
+          if (r) r.style.width = realPct + '%';
+          if (f) f.style.width = fakePct + '%';
         }));
-      }catch(err){
+      } catch (err) {
         results.insertAdjacentHTML('beforeend',
           `<div class="error-card"><strong>${esc(file.name)}</strong>${esc(err.message)}</div>`);
       }
     }
-    progress.classList.remove('visible');btn.disabled=false;
+    progress.classList.remove('visible'); btn.disabled = false;
   }
 </script>
 </body>
