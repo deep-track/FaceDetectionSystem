@@ -1,19 +1,18 @@
 import os
 import uuid
 import logging
+from datetime import datetime, date, timedelta, timezone
 from dotenv import load_dotenv
 from fastapi import Request, HTTPException
-from supabase import create_client, Client
+from supabase import create_client
+import redis as redis_lib
 
 load_dotenv()
 logger = logging.getLogger("deeptrack.auth")
-
-supabase_client: Client = None
+supabase_client= None
+redis_client = None
 
 def get_supabase():
-    """
-    creates a supabase client instance
-    """
     global supabase_client
     if supabase_client is None:
         url = os.getenv("SUPABASE_URL")
@@ -23,6 +22,23 @@ def get_supabase():
         supabase_client = create_client(url, key)
     return supabase_client
 
+
+def get_redis():
+    global redis_client
+    if redis_client is None:
+        url = os.getenv("REDIS_URL")
+        if url:
+            redis_client = redis_lib.from_url(url, decode_responses=True)
+            logger.info("Redis client connected.")
+        else:
+            logger.warning("REDIS_URL not set — rate limiting disabled.")
+    return redis_client
+
+def _next_midnight() -> int:
+    """Unix timestamp of next UTC midnight, used to expire Redis counters."""
+    tomorrow = date.today() + timedelta(days=1)
+    midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=timezone.utc)
+    return int(midnight.timestamp())
 
 def generate_api_key(owner: str, user_id: str, daily_limit: int = 10, notes: str = "") -> str:
     """
@@ -45,15 +61,12 @@ def generate_api_key(owner: str, user_id: str, daily_limit: int = 10, notes: str
 
 async def verify_api_key(request: Request) -> dict:
     """
-    FastAPI dependency — validates key and attaches api_limit to request.state.
-    SlowAPI reads request.state.api_limit to apply the per-key rate limit.
+    FastAPI dependency — validates key, enforces daily rate limit via Redis,
+    and attaches api_limit to request.state.
     """
     raw_key = request.headers.get("X-API-Key")
     if not raw_key:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing X-API-Key header."
-        )
+        raise HTTPException(status_code=401, detail="Missing X-API-Key header.")
 
     db = get_supabase()
 
@@ -71,8 +84,25 @@ async def verify_api_key(request: Request) -> dict:
     if not res.data or not res.data["is_active"]:
         raise HTTPException(status_code=401, detail="Invalid or inactive API key.")
 
-    # Attach limit to request state — SlowAPI callable reads this
-    request.state.api_key_row = res.data
-    request.state.api_limit   = res.data["daily_limit"]
+    key_row     = res.data
+    daily_limit = key_row["daily_limit"]
 
-    return res.data
+    # Redis counter — one key per api_key per day, auto-expires at midnight
+    r = get_redis()
+    if r:
+        today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        redis_key = f"ratelimit:{key_row['id']}:{today}"
+        used      = r.incr(redis_key)  # atomic increment, returns new count
+        if used == 1:
+            r.expireat(redis_key, _next_midnight())  # set TTL on first request of the day
+        if used > daily_limit:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Daily limit of {daily_limit} requests exceeded. "
+                       f"Upgrade at deeptrack.io/pricing"
+            )
+
+    request.state.api_key_row = key_row
+    request.state.api_limit   = daily_limit
+
+    return key_row
