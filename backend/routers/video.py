@@ -561,7 +561,7 @@ async def video_ui():
       fill.style.width = pct + '%';
       fill.className   = 'usage-fill' + (pct >= 90 ? ' danger' : pct >= 70 ? ' warn' : '');
       document.getElementById('usage-count').textContent =
-        data.remaining + ' remaining / ' + data.daily_limit;
+        data.remaining + ' remaining / ' + data.monthly_limit;
       document.getElementById('usage-bar').style.display = 'block';
     } catch (e) {}
   }

@@ -207,8 +207,8 @@ async def image_ui():
       const r    = await fetch('/v1/client/usage/me', { headers: { 'X-API-Key': key } });
       if (!r.ok) return;
       const data = await r.json();
-      const used  = data.used_today;
-      const limit = data.daily_limit;
+      const used  = data.used_this_month;
+      const limit = data.monthly_limit;
       const pct   = Math.min((used / limit) * 100, 100).toFixed(1);
       const fill  = document.getElementById('usage-fill');
       fill.style.width = pct + '%';

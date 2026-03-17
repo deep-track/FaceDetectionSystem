@@ -1,13 +1,12 @@
 import os
 import logging
-from dotenv import load_dotenv
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from core.auth import generate_api_key, get_supabase
+from core.auth import generate_api_key, get_supabase, get_redis
 from admin_ui import ADMIN_UI
 
-load_dotenv()
 logger = logging.getLogger("deeptrack.admin")
 router = APIRouter()
 
@@ -18,47 +17,27 @@ def _check_admin(x_admin_secret: str = Header(...)):
         raise HTTPException(403, "Forbidden")
 
 class CreateKeyRequest(BaseModel):
-    owner:       str
-    user_id:     str = "00000000-0000-0000-0000-000000000000"
-    daily_limit: int = 10
-    notes:       str = ""
+    owner:         str
+    user_id:       str
+    monthly_limit: int = 100
+    notes:         str = ""
 
 class UpdateLimitRequest(BaseModel):
-    daily_limit: int
+    monthly_limit: int
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def admin_dashboard():
-    """
-    Admin dashboard — open in browser, enter ADMIN_SECRET to authenticate.
-    No server-side session — the secret is used as a header on every API call.
-    """
     return ADMIN_UI
-
-@router.get("/users", summary="List all users")
-def list_users(_=Depends(_check_admin)):
-    db  = get_supabase()
-    res = (
-        db.table("users")
-        .select("id, name, email")
-        .order("created_at", desc=True)
-        .execute()
-    )
-    return {"users": res.data}
 
 @router.post("/keys", summary="Create API key for a client")
 def create_key(body: CreateKeyRequest, _=Depends(_check_admin)):
-    """Generate a new API key. Raw key is only returned once — store it."""
     key = generate_api_key(
-        owner       = body.owner,
-        user_id     = body.user_id,
-        daily_limit = body.daily_limit,
-        notes       = body.notes,
+        owner         = body.owner,
+        user_id       = body.user_id,
+        monthly_limit = body.monthly_limit,
+        notes         = body.notes,
     )
-    return {
-        "key":         key,
-        "owner":       body.owner,
-        "daily_limit": body.daily_limit,
-    }
+    return {"key": key, "owner": body.owner, "monthly_limit": body.monthly_limit}
 
 
 @router.get("/keys", summary="List all API keys")
@@ -66,18 +45,18 @@ def list_keys(_=Depends(_check_admin)):
     db  = get_supabase()
     res = (
         db.table("api_details")
-        .select("id, owner, user_id, api_key, daily_limit, is_active, notes, created_at")
+        .select("id, owner, user_id, api_key, monthly_limit, is_active, notes, created_at")
         .order("created_at", desc=True)
         .execute()
     )
     return {"keys": res.data, "total": len(res.data)}
 
 
-@router.patch("/keys/{key_id}/limit", summary="Update daily limit")
+@router.patch("/keys/{key_id}/limit", summary="Update monthly limit")
 def update_limit(key_id: str, body: UpdateLimitRequest, _=Depends(_check_admin)):
     db = get_supabase()
-    db.table("api_details").update({"daily_limit": body.daily_limit}).eq("id", key_id).execute()
-    return {"key_id": key_id, "daily_limit": body.daily_limit}
+    db.table("api_details").update({"monthly_limit": body.monthly_limit}).eq("id", key_id).execute()
+    return {"key_id": key_id, "monthly_limit": body.monthly_limit}
 
 
 @router.patch("/keys/{key_id}/deactivate", summary="Deactivate a key")
@@ -99,7 +78,7 @@ def get_key(key_id: str, _=Depends(_check_admin)):
     db  = get_supabase()
     res = (
         db.table("api_details")
-        .select("id, owner, user_id, daily_limit, is_active, notes, created_at")
+        .select("id, owner, user_id, monthly_limit, is_active, notes, created_at")
         .eq("id", key_id)
         .single()
         .execute()
@@ -107,3 +86,35 @@ def get_key(key_id: str, _=Depends(_check_admin)):
     if not res.data:
         raise HTTPException(404, "Key not found")
     return res.data
+
+
+@router.get("/users", summary="List all users")
+def list_users(_=Depends(_check_admin)):
+    db  = get_supabase()
+    res = (
+        db.table("users")
+        .select("id, name, email")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return {"users": res.data}
+
+
+@router.get("/usage/month", summary="This month's usage count for every key")
+def usage_month(_=Depends(_check_admin)):
+    """Returns dict of key_id -> scans used this month."""
+    r = get_redis()
+    if not r:
+        return {"usage": {}, "note": "Redis not connected"}
+
+    month   = datetime.now(timezone.utc).strftime("%Y-%m")
+    keys    = r.keys(f"ratelimit:*:{month}")
+    usage   = {}
+    for redis_key in keys:
+        parts  = redis_key.split(":")
+        key_id = parts[1] if len(parts) == 3 else None
+        if key_id:
+            val           = r.get(redis_key)
+            usage[key_id] = int(val) if val else 0
+
+    return {"usage": usage, "month": month}
