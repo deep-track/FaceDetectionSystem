@@ -18,6 +18,7 @@ ADMIN_UI = """<!DOCTYPE html>
     --accent2:  #b8cc2a;
     --red:      #ff3355;
     --green:    #00e87a;
+    --blue:     #00aaff;
     --mono:     'DM Mono', monospace;
     --display:  'Syne', sans-serif;
   }
@@ -69,36 +70,49 @@ ADMIN_UI = """<!DOCTYPE html>
   .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); display: inline-block; margin-right: 6px; }
 
   main { max-width: 1200px; margin: 0 auto; padding: 40px 32px; }
-  .section-title { font-family: var(--display); font-size: .65rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+
+  .section-title {
+    font-family: var(--display); font-size: .65rem; letter-spacing: .2em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 20px;
+    padding-bottom: 10px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .track-badge {
+    font-size: .58rem; padding: 2px 8px; border-radius: 2px;
+    letter-spacing: .1em; text-transform: uppercase; font-weight: 500;
+  }
+  .track-badge.api      { background: rgba(0,170,255,.12); color: var(--blue);   border: 1px solid rgba(0,170,255,.2); }
+  .track-badge.platform { background: rgba(232,255,71,.12); color: var(--accent); border: 1px solid rgba(232,255,71,.2); }
 
   .create-panel { background: var(--surface); border: 1px solid var(--border); padding: 28px 32px; margin-bottom: 40px; }
-  .form-grid { display: grid; grid-template-columns: 1fr 1fr 120px 120px; gap: 16px; align-items: end; margin-top: 20px; }
+  .form-grid-5 { display: grid; grid-template-columns: 1fr 1fr 1fr 100px 100px; gap: 14px; align-items: end; margin-top: 20px; }
   .form-field { display: flex; flex-direction: column; gap: 8px; }
+  .plan-hint { font-size: .65rem; color: var(--muted); margin-top: 4px; min-height: 14px; }
 
-  .table-wrap { background: var(--surface); border: 1px solid var(--border); overflow: hidden; overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; min-width: 960px; }
+  .table-wrap { background: var(--surface); border: 1px solid var(--border); overflow: hidden; overflow-x: auto; margin-bottom: 52px; }
+  table { width: 100%; border-collapse: collapse; min-width: 980px; }
   thead tr { border-bottom: 1px solid var(--border2); }
   th { font-size: .62rem; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); padding: 12px 16px; text-align: left; font-weight: 500; white-space: nowrap; }
   tbody tr { border-bottom: 1px solid var(--border); transition: background .1s; }
   tbody tr:last-child { border-bottom: none; }
   tbody tr:hover { background: var(--surface2); }
   td { padding: 14px 16px; color: var(--text); font-size: 12px; }
-
   .key-value { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: .04em; }
+
   .pill { display: inline-block; font-size: .6rem; font-weight: 500; letter-spacing: .1em; text-transform: uppercase; padding: 2px 8px; border-radius: 2px; }
   .pill-active   { background: rgba(0,232,122,.12); color: var(--green); }
   .pill-inactive { background: rgba(255,51,85,.12);  color: var(--red); }
-  .td-actions { display: flex; gap: 8px; align-items: center; }
 
-  .limit-input { width: 90px; background: var(--bg); border: 1px solid var(--border2); color: var(--text); font-family: var(--mono); font-size: 12px; padding: 5px 8px; outline: none; }
-  .limit-input:focus { border-color: var(--accent); }
+  .td-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .limit-input-sm { width: 80px; background: var(--bg); border: 1px solid var(--border2); color: var(--text); font-family: var(--mono); font-size: 12px; padding: 5px 8px; outline: none; }
+  .limit-input-sm:focus { border-color: var(--accent); }
 
-  .usage-wrap { display: flex; align-items: center; gap: 8px; min-width: 160px; }
+  .usage-wrap { display: flex; align-items: center; gap: 8px; min-width: 150px; }
   .usage-track { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
   .usage-fill  { height: 100%; border-radius: 2px; background: var(--accent); transition: width .4s ease; }
   .usage-fill.warn   { background: #ffaa00; }
   .usage-fill.danger { background: var(--red); }
-  .usage-label { font-size: 10px; color: var(--muted); white-space: nowrap; min-width: 70px; text-align: right; }
+  .usage-label { font-size: 10px; color: var(--muted); white-space: nowrap; min-width: 60px; text-align: right; }
 
   #toast { position: fixed; bottom: 32px; right: 32px; background: var(--surface2); border: 1px solid var(--border2); padding: 12px 20px; font-size: 12px; letter-spacing: .04em; opacity: 0; transform: translateY(8px); transition: opacity .2s, transform .2s; pointer-events: none; z-index: 100; max-width: 360px; }
   #toast.show { opacity: 1; transform: translateY(0); }
@@ -141,54 +155,109 @@ ADMIN_UI = """<!DOCTYPE html>
   </header>
 
   <main>
-    <div class="section-title">// Generate API Key</div>
+
+    <!-- API Track -->
+    <div class="section-title">// Generate Key <span class="track-badge api">API</span></div>
     <div class="create-panel">
-      <div class="form-grid">
+      <div class="form-grid-5">
         <div class="form-field">
-          <label class="field-label">Owner / Company</label>
-          <input type="text" id="new-owner" placeholder="e.g. Gotham Media">
+          <label class="field-label">Owner</label>
+          <input type="text" id="api-owner" placeholder="e.g. Gotham Media">
         </div>
         <div class="form-field">
           <label class="field-label">User</label>
-          <select id="new-user"><option value="">Loading users...</option></select>
+          <select id="api-user"><option value="">Loading...</option></select>
         </div>
         <div class="form-field">
-          <label class="field-label">Monthly Limit</label>
-          <input type="number" id="new-limit" value="100" min="1">
+          <label class="field-label">Plan</label>
+          <select id="api-plan" onchange="onPlanChange('api')">
+            <option value="payg">Pay-as-you-go · ∞ · $0.40/scan</option>
+            <option value="starter">Starter · 5,000/mo · $0.39/scan</option>
+            <option value="growth">Growth · 25,000/mo · $0.37/scan</option>
+            <option value="scale">Scale · 100,000/mo · $0.36/scan</option>
+            <option value="enterprise">Enterprise · ∞ · $0.35/scan</option>
+          </select>
+          <div class="plan-hint" id="api-plan-hint">No commitment · billed on actual usage</div>
         </div>
-        <button class="btn btn-accent" style="height:41px" onclick="createKey()">Generate</button>
+        <div class="form-field">
+          <label class="field-label">Limit Override</label>
+          <input type="number" id="api-limit" placeholder="Default" min="1"
+                 title="Leave blank to use plan default">
+        </div>
+        <button class="btn btn-accent" style="height:41px" onclick="createKey('api')">Generate</button>
       </div>
       <div class="form-field" style="margin-top:16px">
         <label class="field-label">Notes (optional)</label>
-        <input type="text" id="new-notes" placeholder="e.g. Gotham enterprise — March 2026">
+        <input type="text" id="api-notes" placeholder="e.g. Gotham enterprise — custom 30k limit">
       </div>
-      <div class="key-reveal" id="key-reveal">
+      <div class="key-reveal" id="api-key-reveal">
         <div class="key-reveal-label">⚡ New API Key — copy now, shown once</div>
-        <div class="key-reveal-value" id="key-reveal-value" onclick="copyKey()" title="Click to copy"></div>
+        <div class="key-reveal-value" id="api-key-reveal-value" onclick="copyKey('api')" title="Click to copy"></div>
         <div class="key-reveal-hint">Click to copy · Share securely with the client</div>
       </div>
     </div>
 
-    <div class="section-title">// Active Keys</div>
+    <div class="section-title">// Active Keys <span class="track-badge api">API</span></div>
     <div class="table-wrap">
       <table>
         <thead>
-          <tr>
-            <th>Owner</th>
-            <th>API Key</th>
-            <th>Monthly Limit</th>
-            <th>Monthly Usage</th>
-            <th>Status</th>
-            <th>Created</th>
-            <th>Notes</th>
-            <th>Actions</th>
-          </tr>
+          <tr><th>Owner</th><th>API Key</th><th>Plan</th><th>Monthly Limit</th><th>Monthly Usage</th><th>Status</th><th>Created</th><th>Notes</th><th>Actions</th></tr>
         </thead>
-        <tbody id="keys-tbody">
-          <tr><td colspan="8" class="empty-state">Loading...</td></tr>
-        </tbody>
+        <tbody id="api-tbody"><tr><td colspan="9" class="empty-state"><span class="spinner-inline"></span>Loading...</td></tr></tbody>
       </table>
     </div>
+
+    <!-- Platform Track -->
+    <div class="section-title">// Generate Key <span class="track-badge platform">Platform</span></div>
+    <div class="create-panel">
+      <div class="form-grid-5">
+        <div class="form-field">
+          <label class="field-label">Owner</label>
+          <input type="text" id="plat-owner" placeholder="e.g. Acme Corp">
+        </div>
+        <div class="form-field">
+          <label class="field-label">User</label>
+          <select id="plat-user"><option value="">Loading...</option></select>
+        </div>
+        <div class="form-field">
+          <label class="field-label">Plan</label>
+          <select id="plat-plan" onchange="onPlanChange('platform')">
+            <option value="trial">Trial · 20/mo · Free</option>
+            <option value="starter">Starter · 150/mo · $75/mo</option>
+            <option value="pro">Pro · 600/mo · $259/mo</option>
+            <option value="business">Business · 2,500/mo · $999/mo</option>
+            <option value="enterprise">Enterprise · ∞ · Custom</option>
+          </select>
+          <div class="plan-hint" id="plat-plan-hint">20 free scans · no credit card required</div>
+        </div>
+        <div class="form-field">
+          <label class="field-label">Limit Override</label>
+          <input type="number" id="plat-limit" placeholder="Default" min="1"
+                 title="Leave blank to use plan default">
+        </div>
+        <button class="btn btn-accent" style="height:41px" onclick="createKey('platform')">Generate</button>
+      </div>
+      <div class="form-field" style="margin-top:16px">
+        <label class="field-label">Notes (optional)</label>
+        <input type="text" id="plat-notes" placeholder="e.g. Trial expires 2026-04-01">
+      </div>
+      <div class="key-reveal" id="plat-key-reveal">
+        <div class="key-reveal-label">⚡ New Platform Key — copy now, shown once</div>
+        <div class="key-reveal-value" id="plat-key-reveal-value" onclick="copyKey('platform')" title="Click to copy"></div>
+        <div class="key-reveal-hint">Click to copy · Share securely with the client</div>
+      </div>
+    </div>
+
+    <div class="section-title">// Active Keys <span class="track-badge platform">Platform</span></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Owner</th><th>API Key</th><th>Plan</th><th>Monthly Limit</th><th>Monthly Usage</th><th>Status</th><th>Created</th><th>Notes</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="plat-tbody"><tr><td colspan="9" class="empty-state"><span class="spinner-inline"></span>Loading...</td></tr></tbody>
+      </table>
+    </div>
+
   </main>
 </div>
 
@@ -196,6 +265,30 @@ ADMIN_UI = """<!DOCTYPE html>
 
 <script>
   let SECRET = '';
+
+  const PLAN_HINTS = {
+    api: {
+      payg:       'No commitment · billed on actual usage',
+      starter:    '$1,925/mo · up to 5,000 scans',
+      growth:     '$9,125/mo · up to 25,000 scans',
+      scale:      '$36,000/mo · up to 100,000 scans',
+      enterprise: 'Custom contract · 100,000+ scans',
+    },
+    platform: {
+      trial:      '20 free scans · no credit card required',
+      starter:    '$75/mo · 150 scans',
+      pro:        '$259/mo · 600 scans',
+      business:   '$999/mo · 2,500 scans',
+      enterprise: 'Custom pricing · dedicated account manager',
+    },
+  };
+
+  function onPlanChange(track) {
+    const plan = document.getElementById(track + '-plan').value;
+    document.getElementById(track + '-plan-hint').textContent = PLAN_HINTS[track][plan] || '';
+    // clear limit override so user knows it'll use plan default
+    document.getElementById(track + '-limit').value = '';
+  }
 
   async function doLogin() {
     const s = document.getElementById('secret-input').value.trim();
@@ -208,9 +301,7 @@ ADMIN_UI = """<!DOCTYPE html>
       document.getElementById('main-screen').style.display = 'block';
       loadUsers();
       loadKeys();
-    } catch (e) {
-      document.getElementById('auth-error').textContent = 'Could not reach API.';
-    }
+    } catch (e) { document.getElementById('auth-error').textContent = 'Could not reach API.'; }
   }
 
   function logout() {
@@ -230,131 +321,145 @@ ADMIN_UI = """<!DOCTYPE html>
   }
 
   async function loadUsers() {
-    const sel = document.getElementById('new-user');
     try {
-      const r    = await fetch('/admin/users', { headers: { 'X-Admin-Secret': SECRET } });
-      const data = await r.json();
-      sel.innerHTML = '';
-      if (!data.users || !data.users.length) { sel.innerHTML = '<option value="">No users found</option>'; return; }
-      data.users.forEach(u => {
-        const opt = document.createElement('option');
-        opt.value = u.id; opt.textContent = u.name + ' (' + u.email + ')';
-        sel.appendChild(opt);
+      const r     = await fetch('/admin/users', { headers: { 'X-Admin-Secret': SECRET } });
+      const data  = await r.json();
+      const users = data.users || [];
+      const opts  = users.length
+        ? users.map(u => `<option value="${u.id}">${esc(u.name)} (${esc(u.email)})</option>`).join('')
+        : '<option value="">No users found</option>';
+      ['api-user','plat-user'].forEach(id => document.getElementById(id).innerHTML = opts);
+    } catch (e) {
+      ['api-user','plat-user'].forEach(id => {
+        document.getElementById(id).innerHTML = '<option value="">Failed to load</option>';
       });
-    } catch (e) { sel.innerHTML = '<option value="">Failed to load users</option>'; }
+    }
   }
 
   async function loadKeys() {
-    const tbody = document.getElementById('keys-tbody');
-    tbody.innerHTML = '<tr><td colspan="8" class="empty-state"><span class="spinner-inline"></span>Loading...</td></tr>';
+    const loading = (cols) => `<tr><td colspan="${cols}" class="empty-state"><span class="spinner-inline"></span>Loading...</td></tr>`;
+    document.getElementById('api-tbody').innerHTML  = loading(9);
+    document.getElementById('plat-tbody').innerHTML = loading(9);
+
     try {
       const [keysRes, usageRes] = await Promise.all([
         fetch('/admin/keys',        { headers: { 'X-Admin-Secret': SECRET } }),
         fetch('/admin/usage/month', { headers: { 'X-Admin-Secret': SECRET } }),
       ]);
-      const keysData  = await keysRes.json();
-      const usageData = usageRes.ok ? await usageRes.json() : { usage: {} };
-      const keys      = keysData.keys || [];
+      const { keys = [] } = await keysRes.json();
+      const { usage = {} } = usageRes.ok ? await usageRes.json() : {};
 
-      if (!keys.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No keys yet — generate one above</td></tr>';
-        return;
-      }
-
-      tbody.innerHTML = keys.map(k => {
-        const limit     = k.monthly_limit;
-        const used      = usageData.usage[k.id] || 0;
-        const pct       = Math.min((used / limit) * 100, 100).toFixed(1);
-        const fillCls   = pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : '';
-        const remaining = Math.max(limit - used, 0).toLocaleString();
-
-        return `
-        <tr id="row-${k.id}">
-          <td><strong>${esc(k.owner || '—')}</strong></td>
-          <td><span class="key-value">${esc((k.api_key || '').slice(0, 24))}...</span></td>
-          <td>
-            <input class="limit-input" type="number" value="${limit}" min="1"
-                   id="limit-${k.id}" onkeydown="if(event.key==='Enter') updateLimit('${k.id}')">
-          </td>
-          <td>
-            <div class="usage-wrap">
-              <div class="usage-track">
-                <div class="usage-fill ${fillCls}" style="width:${pct}%"></div>
-              </div>
-              <span class="usage-label">${remaining} left</span>
-            </div>
-          </td>
-          <td><span class="pill ${k.is_active ? 'pill-active' : 'pill-inactive'}">${k.is_active ? 'Active' : 'Inactive'}</span></td>
-          <td>${formatDate(k.created_at)}</td>
-          <td style="color:var(--muted);font-size:11px">${esc(k.notes || '—')}</td>
-          <td>
-            <div class="td-actions">
-              <button class="btn btn-ghost" style="font-size:10px;padding:5px 10px"
-                      onclick="updateLimit('${k.id}')">Save</button>
-              ${k.is_active
-                ? `<button class="btn btn-danger" style="font-size:10px;padding:5px 10px"
-                           onclick="toggleKey('${k.id}', false)">Deactivate</button>`
-                : `<button class="btn btn-success" style="font-size:10px;padding:5px 10px"
-                           onclick="toggleKey('${k.id}', true)">Activate</button>`
-              }
-            </div>
-          </td>
-        </tr>`;
-      }).join('');
+      renderTable('api-tbody',  keys.filter(k => k.track === 'api'),      usage);
+      renderTable('plat-tbody', keys.filter(k => k.track === 'platform'), usage);
     } catch (e) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty-state" style="color:var(--red)">Failed to load keys</td></tr>';
+      const err = (cols) => `<tr><td colspan="${cols}" class="empty-state" style="color:var(--red)">Failed to load</td></tr>`;
+      document.getElementById('api-tbody').innerHTML  = err(9);
+      document.getElementById('plat-tbody').innerHTML = err(9);
     }
   }
 
-  async function createKey() {
-    const owner   = document.getElementById('new-owner').value.trim();
-    const user_id = document.getElementById('new-user').value;
-    const limit   = parseInt(document.getElementById('new-limit').value) || 100;
-    const notes   = document.getElementById('new-notes').value.trim();
+  function renderTable(tbodyId, keys, usage) {
+    const tbody = document.getElementById(tbodyId);
+    if (!keys.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No keys yet — generate one above</td></tr>';
+      return;
+    }
+    tbody.innerHTML = keys.map(k => {
+      const limit    = k.monthly_limit || 0;
+      const used     = usage[k.id] || 0;
+      const isUnlim  = limit >= 999999;
+      const pct      = isUnlim ? 0 : Math.min((used / limit) * 100, 100).toFixed(1);
+      const fillCls  = pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : '';
+      const remTxt   = isUnlim ? '∞' : Math.max(limit - used, 0).toLocaleString();
+      const limitTxt = isUnlim ? '∞' : limit.toLocaleString();
+
+      return `<tr>
+        <td><strong>${esc(k.owner||'—')}</strong></td>
+        <td><span class="key-value">${esc((k.api_key||'').slice(0,24))}...</span></td>
+        <td style="font-size:11px;color:var(--muted)">${esc(k.plan||'—')}</td>
+        <td>
+          <input class="limit-input-sm" type="number" value="${isUnlim ? '' : limit}"
+                 id="lim-${k.id}" placeholder="${isUnlim ? '∞' : limit}"
+                 onkeydown="if(event.key==='Enter') updateLimit('${k.id}')">
+        </td>
+        <td>
+          <div class="usage-wrap">
+            <div class="usage-track"><div class="usage-fill ${fillCls}" style="width:${isUnlim?0:pct}%"></div></div>
+            <span class="usage-label">${remTxt} / ${limitTxt}</span>
+          </div>
+        </td>
+        <td><span class="pill ${k.is_active?'pill-active':'pill-inactive'}">${k.is_active?'Active':'Inactive'}</span></td>
+        <td>${formatDate(k.created_at)}</td>
+        <td style="color:var(--muted);font-size:11px">${esc(k.notes||'—')}</td>
+        <td>
+          <div class="td-actions">
+            <button class="btn btn-ghost" style="font-size:10px;padding:5px 10px"
+                    onclick="updateLimit('${k.id}')">Save</button>
+            ${k.is_active
+              ? `<button class="btn btn-danger" style="font-size:10px;padding:5px 10px"
+                         onclick="toggleKey('${k.id}',false)">Deactivate</button>`
+              : `<button class="btn btn-success" style="font-size:10px;padding:5px 10px"
+                         onclick="toggleKey('${k.id}',true)">Activate</button>`
+            }
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function createKey(track) {
+    const owner   = document.getElementById(track + '-owner').value.trim();
+    const user_id = document.getElementById(track + '-user').value;
+    const plan    = document.getElementById(track + '-plan').value;
+    const notes   = document.getElementById(track + '-notes').value.trim();
+    const limRaw  = document.getElementById(track + '-limit').value;
+    const monthly_limit = limRaw ? parseInt(limRaw) : null;
+
     if (!owner)   { toast('Owner name is required', 'err'); return; }
-    if (!user_id) { toast('Please select a user', 'err'); return; }
+    if (!user_id) { toast('Please select a user', 'err');   return; }
+
     try {
-      const r = await fetch('/admin/keys', {
-        method: 'POST',
+      const r    = await fetch('/admin/keys', {
+        method:  'POST',
         headers: { 'X-Admin-Secret': SECRET, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ owner, user_id, monthly_limit: limit, notes }),
+        body:    JSON.stringify({ owner, user_id, track, plan, monthly_limit, notes }),
       });
       const data = await r.json();
       if (!r.ok) { toast(data.detail || 'Failed to create key', 'err'); return; }
-      document.getElementById('key-reveal-value').textContent = data.key;
-      document.getElementById('key-reveal').style.display = 'block';
-      document.getElementById('new-owner').value = '';
-      document.getElementById('new-notes').value = '';
-      document.getElementById('new-limit').value = '100';
-      toast('Key generated for ' + owner, 'ok');
+      document.getElementById(track + '-key-reveal-value').textContent = data.key;
+      document.getElementById(track + '-key-reveal').style.display = 'block';
+      document.getElementById(track + '-owner').value = '';
+      document.getElementById(track + '-notes').value = '';
+      document.getElementById(track + '-limit').value = '';
+      toast(`Key generated for ${owner} · ${data.monthly_limit.toLocaleString()} scans/mo`, 'ok');
       loadKeys();
     } catch (e) { toast('Network error', 'err'); }
   }
 
-  function copyKey() {
-    const val = document.getElementById('key-reveal-value').textContent;
+  function copyKey(track) {
+    const val = document.getElementById(track + '-key-reveal-value').textContent;
     navigator.clipboard.writeText(val).then(() => toast('Key copied to clipboard', 'ok'));
   }
 
   async function updateLimit(keyId) {
-    const newLimit = parseInt(document.getElementById('limit-' + keyId).value);
-    if (!newLimit || newLimit < 1) { toast('Invalid limit', 'err'); return; }
+    const val = document.getElementById('lim-' + keyId).value;
+    const newLimit = parseInt(val);
+    if (!newLimit || newLimit < 1) { toast('Enter a valid limit', 'err'); return; }
     try {
       const r = await fetch('/admin/keys/' + keyId + '/limit', {
-        method: 'PATCH',
+        method:  'PATCH',
         headers: { 'X-Admin-Secret': SECRET, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ monthly_limit: newLimit }),
+        body:    JSON.stringify({ monthly_limit: newLimit }),
       });
       if (!r.ok) { toast('Failed to update', 'err'); return; }
-      toast('Limit updated to ' + newLimit + '/month', 'ok');
+      toast('Limit updated to ' + newLimit.toLocaleString() + '/mo', 'ok');
       loadKeys();
     } catch (e) { toast('Network error', 'err'); }
   }
 
   async function toggleKey(keyId, activate) {
-    const endpoint = activate ? 'activate' : 'deactivate';
     try {
-      const r = await fetch('/admin/keys/' + keyId + '/' + endpoint, {
+      const r = await fetch('/admin/keys/' + keyId + '/' + (activate ? 'activate' : 'deactivate'), {
         method: 'PATCH', headers: { 'X-Admin-Secret': SECRET },
       });
       if (!r.ok) { toast('Failed', 'err'); return; }
@@ -364,12 +469,11 @@ ADMIN_UI = """<!DOCTYPE html>
   }
 
   function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
-
   function formatDate(iso) {
     if (!iso) return '—';
-    return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+    return new Date(iso).toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
   }
 </script>
 </body>
