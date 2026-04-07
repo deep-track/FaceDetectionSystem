@@ -12,7 +12,9 @@ import mediapipe as mp
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
@@ -20,6 +22,7 @@ from pydantic import BaseModel
 from scipy.signal import butter, filtfilt, welch
 from typing import Optional
 
+load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -398,7 +401,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="FakeCatcher API", version="1.0", lifespan=lifespan)
 
-@app.post("/predict/frame")
+# configure middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/v1/predict/frame")
 async def predict_frame(req: FrameRequest):
     """
     Send one webcam frame as a base64 JPEG.
@@ -437,7 +449,7 @@ async def predict_frame(req: FrameRequest):
     }
 
 
-@app.get("/status")
+@app.get("/v1/status")
 async def status():
     return {
         'buffer_fill_pct': buffer.fill_pct,
@@ -448,7 +460,7 @@ async def status():
     }
 
 
-@app.get("/health")
+@app.get("/v1/health")
 async def health():
     """Liveness check, returns 200 if server and model are ready."""
     if predictor is None:
@@ -456,7 +468,7 @@ async def health():
     return {'status': 'ok', 'model': 'operational', 'server': 'operational'}
 
 
-@app.get("/metrics")
+@app.get("/v1/metrics")
 async def metrics():
     """Server metrics for monitoring during stress tests."""
     job_counts = {}
@@ -471,7 +483,7 @@ async def metrics():
     }
 
 
-@app.post("/reset")
+@app.post("/v1/reset")
 async def reset():
     buffer.reset()
     return {'status': 'reset', 'message': 'Frame buffer cleared.'}
@@ -510,7 +522,7 @@ def _purge_old_jobs():
         logger.info(f"Purged {len(stale)} stale jobs")
 
 
-@app.post("/predict/video")
+@app.post("/v1/predict/video")
 async def predict_video(file: UploadFile = File(...)):
     """
     Upload a video file for deepfake analysis.
@@ -558,7 +570,7 @@ async def predict_video(file: UploadFile = File(...)):
     }
 
 
-@app.get("/jobs/{job_id}")
+@app.get("/v1/jobs/{job_id}")
 async def get_job(job_id: str):
     """Poll for the result of a video prediction job."""
     job = jobs.get(job_id)
@@ -575,7 +587,7 @@ async def get_job(job_id: str):
     }
 
 
-@app.get("/jobs")
+@app.get("/v1/jobs")
 async def list_jobs():
     """List all active jobs — useful for monitoring stress test progress."""
     summary = {
@@ -592,7 +604,7 @@ async def list_jobs():
     return {'jobs': summary, 'counts': counts, 'total': len(jobs)}
 
 
-@app.websocket("/ws/predict")
+@app.websocket("/v1/ws/predict")
 async def websocket_predict(ws: WebSocket):
     """
     WebSocket endpoint for real-time webcam streaming.

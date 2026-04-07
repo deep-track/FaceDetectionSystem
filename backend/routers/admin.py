@@ -2,11 +2,19 @@ import os
 import logging
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import Optional
-from core.auth import generate_api_key, get_supabase, get_redis, PLAN_LIMITS, get_default_limit
+from typing import Annotated, Optional
+from core.auth import (
+    generate_api_key,
+    get_supabase,
+    get_redis,
+    PLAN_LIMITS,
+    get_default_limit,
+    is_production_environment,
+    verify_auth0_admin_bearer,
+)
 from admin_ui import ADMIN_UI
 
 load_dotenv()
@@ -15,9 +23,24 @@ router = APIRouter()
 
 ADMIN_SECRET = os.getenv("ADMIN_SECRET")
 
-def _check_admin(x_admin_secret: str = Header(...)):
+
+def _check_admin(
+    request: Request,
+    authorization: Annotated[Optional[str], Header()] = None,
+    x_admin_secret: Annotated[Optional[str], Header()] = None,
+):
+    """
+    Production: Auth0 access token (Authorization: Bearer), e.g. Google or enterprise SSO.
+    Development / tests: X-Admin-Secret (ADMIN_SECRET).
+    """
+    if is_production_environment():
+        claims = verify_auth0_admin_bearer(authorization)
+        request.state.admin_claims = claims
+        return
+    if not ADMIN_SECRET:
+        raise HTTPException(status_code=500, detail="ADMIN_SECRET is not set (required outside production).")
     if x_admin_secret != ADMIN_SECRET:
-        raise HTTPException(403, "Forbidden")
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 class CreateKeyRequest(BaseModel):

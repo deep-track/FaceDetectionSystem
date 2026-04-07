@@ -7,12 +7,82 @@ from dotenv import load_dotenv
 from fastapi import Request, HTTPException
 from supabase import create_client, Client
 import redis as redis_lib
+import jwt
+from jwt import PyJWKClient
 
 load_dotenv()
 logger = logging.getLogger("deeptrack.auth")
 
 supabase_client = None
 redis_client    = None
+_auth0_jwks_client: PyJWKClient | None = None
+
+
+def is_production_environment() -> bool:
+    v = (os.getenv("ENVIRONMENT") or os.getenv("APP_ENV") or "").lower().strip()
+    return v in ("production", "prod")
+
+
+def _auth0_issuer() -> str:
+    explicit = (os.getenv("AUTH0_ISSUER") or "").strip().rstrip("/")
+    if explicit:
+        return explicit + "/"
+    domain = (os.getenv("AUTH0_DOMAIN") or "").strip()
+    if not domain:
+        return ""
+    return f"https://{domain}/"
+
+
+def _auth0_jwks_url() -> str:
+    iss = _auth0_issuer().rstrip("/")
+    if not iss:
+        return ""
+    return f"{iss}/.well-known/jwks.json"
+
+
+def verify_auth0_admin_bearer(authorization: str | None) -> dict:
+    """
+    Validates Authorization: Bearer <JWT> (Auth0 access token: Google, SSO, etc.).
+    Requires AUTH0_AUDIENCE and AUTH0_DOMAIN or AUTH0_ISSUER.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization Bearer token.")
+
+    token = authorization.split(None, 1)[1].strip()
+    audience = (os.getenv("AUTH0_AUDIENCE") or "").strip()
+    issuer   = _auth0_issuer()
+
+    if not audience or not issuer:
+        logger.error("Auth0 admin: AUTH0_AUDIENCE and AUTH0_DOMAIN (or AUTH0_ISSUER) must be set in production.")
+        raise HTTPException(status_code=500, detail="Auth0 is not configured.")
+
+    global _auth0_jwks_client
+    if _auth0_jwks_client is None:
+        jwks_url = _auth0_jwks_url()
+        if not jwks_url:
+            raise HTTPException(status_code=500, detail="Auth0 is not configured.")
+        _auth0_jwks_client = PyJWKClient(jwks_url)
+
+    try:
+        signing_key = _auth0_jwks_client.get_signing_key_from_jwt(token)
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=audience,
+            issuer=issuer,
+            leeway=60,
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired.")
+    except jwt.InvalidTokenError as e:
+        logger.warning("Auth0 JWT rejected: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid or unauthorized token.")
+    except Exception as e:
+        logger.warning("Auth0 JWT verification error: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid or unauthorized token.")
+
+    return payload
 
 # Default monthly limits per plan — used when creating a key.
 # monthly_limit is stored in DB and can be overridden per client.

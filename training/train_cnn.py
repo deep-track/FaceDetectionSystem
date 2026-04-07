@@ -145,7 +145,7 @@ def plot_history(history, save_path='training_history.png'):
 def main():
     parser = argparse.ArgumentParser(description="FakeCatcher CNN Training")
     parser.add_argument('--maps',       required=True,
-                        help='.npz file from 2_ppg_map_extraction.py')
+                        help='.npz file from PPG map extraction')
     parser.add_argument('--output',     default='cnn_model.keras',
                         help='Saved Keras model path')
     parser.add_argument('--epochs',     type=int,   default=20)
