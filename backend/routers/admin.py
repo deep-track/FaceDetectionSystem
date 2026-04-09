@@ -12,7 +12,6 @@ from core.auth import (
     get_redis,
     PLAN_LIMITS,
     get_default_limit,
-    is_production_environment,
     verify_auth0_admin_bearer,
 )
 from admin_ui import ADMIN_UI
@@ -30,15 +29,17 @@ def _check_admin(
     x_admin_secret: Annotated[Optional[str], Header()] = None,
 ):
     """
-    Production: Auth0 access token (Authorization: Bearer), e.g. Google or enterprise SSO.
-    Development / tests: X-Admin-Secret (ADMIN_SECRET).
+    Auth0 bearer token takes priority in all environments.
+    Falls back to X-Admin-Secret for local scripting/tests only.
     """
-    if is_production_environment():
+    if authorization and authorization.lower().startswith("bearer "):
         claims = verify_auth0_admin_bearer(authorization)
         request.state.admin_claims = claims
         return
+
+    # fallback: X-Admin-Secret for local curl/scripts
     if not ADMIN_SECRET:
-        raise HTTPException(status_code=500, detail="ADMIN_SECRET is not set (required outside production).")
+        raise HTTPException(status_code=500, detail="Missing DEEPTRACK_ADMIN_SECRET environment variable")
     if x_admin_secret != ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -48,7 +49,7 @@ class CreateKeyRequest(BaseModel):
     user_id:       str
     track:         str = "api"
     plan:          str = "payg"
-    monthly_limit: Optional[int] = None  # if None, uses plan default
+    monthly_limit: Optional[int] = None
     notes:         str = ""
 
 
@@ -59,7 +60,7 @@ class UpdateLimitRequest(BaseModel):
 class UpdatePlanRequest(BaseModel):
     track: str
     plan:  str
-    monthly_limit: Optional[int] = None  # if None, resets to plan default
+    monthly_limit: Optional[int] = None
 
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -74,10 +75,7 @@ def list_plans(_=Depends(_check_admin)):
 
 @router.post("/keys", summary="Create API key for a client")
 def create_key(body: CreateKeyRequest, _=Depends(_check_admin)):
-    """
-    monthly_limit defaults to plan standard but can be overridden.
-    """
-    key   = generate_api_key(
+    key = generate_api_key(
         owner         = body.owner,
         user_id       = body.user_id,
         track         = body.track,
@@ -109,7 +107,6 @@ def list_keys(_=Depends(_check_admin)):
 
 @router.patch("/keys/{key_id}/limit", summary="Override monthly limit for a key")
 def update_limit(key_id: str, body: UpdateLimitRequest, _=Depends(_check_admin)):
-    """Override the monthly limit without changing the plan label."""
     db = get_supabase()
     db.table("api_details").update({"monthly_limit": body.monthly_limit}).eq("id", key_id).execute()
     return {"key_id": key_id, "monthly_limit": body.monthly_limit}
@@ -117,10 +114,6 @@ def update_limit(key_id: str, body: UpdateLimitRequest, _=Depends(_check_admin))
 
 @router.patch("/keys/{key_id}/plan", summary="Change plan (resets limit to plan default unless overridden)")
 def update_plan(key_id: str, body: UpdatePlanRequest, _=Depends(_check_admin)):
-    """
-    Change the plan label and optionally set a custom limit.
-    If monthly_limit is not provided, resets to the plan's standard limit.
-    """
     if body.track not in PLAN_LIMITS:
         raise HTTPException(400, f"Invalid track. Must be: {list(PLAN_LIMITS.keys())}")
     if body.plan not in PLAN_LIMITS[body.track]:
@@ -168,9 +161,9 @@ def usage_month(_=Depends(_check_admin)):
     if not r:
         return {"usage": {}, "note": "Redis not connected"}
 
-    month   = datetime.now(timezone.utc).strftime("%Y-%m")
-    keys    = r.keys(f"ratelimit:*:{month}")
-    usage   = {}
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    keys  = r.keys(f"ratelimit:*:{month}")
+    usage = {}
     for redis_key in keys:
         parts  = redis_key.split(":")
         key_id = parts[1] if len(parts) == 3 else None
