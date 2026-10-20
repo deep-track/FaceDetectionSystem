@@ -20,65 +20,85 @@ source env_name/bin/activate # Linux/MacOS
 ```bash
 pip install -r requirements.txt
 ```
+## Models
+
+Model files live in `data/` (override the folder with `DATA_DIR`). Nothing is downloaded from anyone else's account.
+
+| File | Used by | Status |
+|------|---------|--------|
+| `data/cnn_model.keras` | video detector (rPPG CNN) | included |
+| `data/face_landmarker.task` | video detector, face cropping | included; downloaded from Google's public MediaPipe bucket if missing |
+| `data/best_swin.pth` | image detector (Swin Transformer) | **not included, train it (below)**. Until it exists the image endpoints report `unavailable`; the video detector works normally |
+| `data/svm_model.pkl` | nothing (trained, not used by the API) | included |
+
+If you host your own model files on HuggingFace, set `HF_REPO_ID=<user>/<repo>` (and `HUGGINGFACE_TOKEN` if the repo is private) and any file missing from `data/` is fetched from there. `python build.py` checks that everything needed is in place.
+
+### Training the image detector
+```bash
+pip install -r requirements-image-model.txt
+
+# 1. crop faces from your real/fake videos or images and split them train/val/test (by video)
+python scripts/prepare_image_dataset.py --real_dir "path/to/real" --fake_dirs "path/to/fakeA" "path/to/fakeB" --out_dir data/image_dataset
+
+# 2. train (use a GPU, e.g. Google Colab or Kaggle) and write data/best_swin.pth
+python training/train_swin.py --data_dir data/image_dataset --epochs 12 --batch 32
+```
+The training script reports false-positive rate (a real face wrongly called fake) and, if you pass `--groups_csv` with a skin-tone label per test image, the same numbers per group. Check those before trusting the model for the general population. The API crops the face before classifying, exactly like the training data (`FACE_CROP=0` turns this off).
+
 ## To run extraction and training scripts
 ### 1. Scripts
-#### A. Extract both features for SVM and PPG Maps for CNN training
-This script extracts features for all deepfake videos and the original videos dataset
-Run this
+#### A. Extract SVM features and PPG maps for CNN training
+Use `scripts/extract_all_generators.py` to extract from the real videos and one or more folders of fake videos (one folder per generator, e.g. Deepfakes, Face2Face, FaceSwap):
+
 ```bash
-python scripts/main.py ^ 
-    --real_dir "path/to/real/videos/orig.mp4" -- ^
-    --fake_dir "path/to/fake/videos1/fake_1.mp4" "path/to/fake/videos2/fake_2.mp4" ^
+python scripts/extract_all_generators.py ^
+    --real_dir     "path/to/original_videos" ^
+    --fake_dirs    "path/to/Deepfakes" "path/to/Face2Face" ^
     --out_features data/features_svm_all.npz ^
     --out_maps     data/ppg_maps_all.npz ^
     --model        data/face_landmarker.task ^
     --limit        1000
 ```
 
-This will run for approximately 6-10 hours and `data/features_svm_all.npz` and `data/ppg_maps_all.npz` will be produced
+(Use `\` instead of `^` on Linux/macOS.) It can also merge newly extracted generators into existing `.npz` files, see the header of the script. For a single real folder and a single fake folder, `scripts/main.py` takes `--real_dir` and `--fake_dir` (one path each).
+
+This will run for approximately 6-10 hours and produces `data/features_svm_all.npz` and `data/ppg_maps_all.npz`.
 
 ### 2. Training scripts
-To run the training scripts,
+Train/test splits are made **by video**, not by segment: every video is cut into overlapping segments, and splitting by segment would leak near-identical data into the test set.
 
 ```bash
 # For CNN
-python training\train_cnn.py --maps data/ppg_maps.npz --output cnn_model.keras --epochs 20 --batch 15 --test_split 0.4
+python training/train_cnn.py --maps data/ppg_maps_all.npz --output data/cnn_model.keras --epochs 20 --batch 15 --test_split 0.4
 
-# For SVM
-python training\train_svm.py --features data/features_svm_1000.npz --output data/svm_model.pkl
+# For SVM (trained and saved, but not used by the API at the moment)
+python training/train_svm.py --features data/features_svm_all.npz --output data/svm_model.pkl
 ```
-## To start backend application and configuration
 
-To start your webcam and check for real/fake probabilities, run
+## To start the backend
+
+The API has two detectors: the video detector (rPPG signals + CNN, `/v1/video/*`) and the image detector (Swin Transformer, `/v1/image/*`). Models are loaded in the background after the server starts; check `GET /v1/health` to see when each one is `operational`.
+
+Model files are looked up in `data/` first (`cnn_model.keras`, `face_landmarker.task`, `best_swin.pth`) and otherwise downloaded from HuggingFace. Set `HUGGINGFACE_TOKEN` in your `.env` or environment if the repository is private. `build.py` pre-downloads the models during a Render build.
+
+Run from the **project root** (not from inside `backend/`):
+
 ```bash
-cd backend
 uvicorn backend.main:app --reload --port 8000
 ```
 
-And the application will be live at `http://localhost:8000`
+The application will be live at `http://localhost:8000`, with interactive docs at `/docs`. See `API.md` for every endpoint.
 
 ### For frontend integration and CORS config
-For the backend to communicate with the frontend, Cross Origin Resource Sharing (CORS) needs to be set up.
-For the backend, set up your `.env` to protect the origins and head over to line 83 of `backend/main.py` at `fastapi.middleware.cors.CORSMiddleware` and change from `allow_origins=["*"]` to  `allow_origins=["ALLOWED_ORIGINS"]` to prevent the backend being accessible from all origins.
+By default the backend allows every origin (`*`). Before deploying, set the `ALLOWED_ORIGINS` environment variable to a comma-separated list of the frontend URLs:
 
-This change will be made to the backend code before pushing to the prod server upon receiving the frontend server URLs.
-Check the example below on how to do this:
-
-#### a. Set up allowed origins in `.env`
-```python
-
-# set up CORSMiddleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://deeptrack-staging.com"], # mask these in .env using os..getenv(ENV_VAR)
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+```bash
+ALLOWED_ORIGINS="http://localhost:5173,https://deeptrack-staging.com"
 ```
+
+No code change is needed; `backend/main.py` reads this variable when it starts.
 
 ## Uploading videos
 Upload fake/real videos for analysis when booting up the live server, since recording deepfake videos and showing them directly to the webcam might be a lot of work to do.
 
-`VIDEO_MODE` is used when uploading videos for processing, while `IMAGE_MODE` is used for webcam streaming for per-frame analysis.
+Uploaded videos are processed with MediaPipe's VIDEO running mode (tracking across frames), while webcam/WebSocket frames use IMAGE mode (each frame analysed on its own).
