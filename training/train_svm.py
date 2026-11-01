@@ -5,7 +5,7 @@ from collections import defaultdict
 
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
+from splits import group_split_indices, describe_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_auc_score
 
 # load data
@@ -98,16 +98,15 @@ def main():
 
     X, y, names = load_features(args.features)
 
-    # split take 60/40 split from paper
+    # 60/40 split from the paper, done BY VIDEO so overlapping segments of one
+    # video can't end up in both train and test.
+    tr_idx, te_idx = group_split_indices(names, test_size=args.test_split, seed=42)
+    X_train, y_train, n_train = X[tr_idx], y[tr_idx], names[tr_idx]
+    X_test,  y_test,  n_test  = X[te_idx], y[te_idx], names[te_idx]
 
-    X_train, X_test, y_train, y_test, n_train, n_test = train_test_split(
-        X, y, names,
-        test_size=args.test_split,
-        stratify=y,
-        random_state=42
-    )
-    print(f"\nTrain segments : {len(X_train)}")
-    print(f"Test  segments : {len(X_test)}")
+    print("\nSplit (by video):")
+    describe_split("train", y_train, n_train)
+    describe_split("test",  y_test,  n_test)
 
     # Scale
     scaler  = StandardScaler()

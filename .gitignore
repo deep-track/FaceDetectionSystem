@@ -16,6 +16,7 @@ data/
 *.npz
 *.pth
 *.db
+*.pyc
 __pycache__/
 mlruns/
 *.ipynb

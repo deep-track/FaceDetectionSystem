@@ -4,7 +4,7 @@ import tensorflow as tf
 from collections import defaultdict
 from tensorflow import keras
 from tensorflow.keras import layers
-from sklearn.model_selection import train_test_split
+from splits import group_split_indices, describe_split
 from sklearn.metrics import (accuracy_score, classification_report,
                              confusion_matrix, roc_auc_score)
 import matplotlib
@@ -152,7 +152,7 @@ def main():
     parser.add_argument('--batch',      type=int,   default=32)
     parser.add_argument('--test_split', type=float, default=0.4)
     parser.add_argument('--val_split',  type=float, default=0.15,
-                        help='Fraction of TRAIN set used for validation')
+                        help='Fraction of TRAIN videos used for validation')
     args = parser.parse_args()
 
     print(f"\n{'='*55}")
@@ -163,15 +163,22 @@ def main():
     # load
     X, y, names = load_maps(args.maps)
 
-    # train-test split, 60/40 as stipulated in the paper
-    X_train, X_test, y_train, y_test, n_train, n_test = train_test_split(
-        X, y, names,
-        test_size=args.test_split,
-        stratify=y,
-        random_state=42
-    )
-    print(f"\nTrain segments : {len(X_train)}")
-    print(f"Test  segments : {len(X_test)}")
+    # train-test split, 60/40 as stipulated in the paper.
+    # Split BY VIDEO: segments overlap by 50%, so a per-segment split leaks
+    # near-identical data into the test set and inflates every metric.
+    tr_idx, te_idx = group_split_indices(names, test_size=args.test_split, seed=42)
+    X_train, y_train, n_train = X[tr_idx], y[tr_idx], names[tr_idx]
+    X_test,  y_test,  n_test  = X[te_idx], y[te_idx], names[te_idx]
+
+    # validation set: again split by video, taken from the training portion only
+    fit_idx, val_idx = group_split_indices(n_train, test_size=args.val_split, seed=7)
+    X_fit, y_fit = X_train[fit_idx], y_train[fit_idx]
+    X_val, y_val = X_train[val_idx], y_train[val_idx]
+
+    print("\nSplit (by video):")
+    describe_split("train", y_fit,  n_train[fit_idx])
+    describe_split("val",   y_val,  n_train[val_idx])
+    describe_split("test",  y_test, n_test)
 
     # build model
     input_shape = X_train.shape[1:]    # (omega, 64, 1)
@@ -194,8 +201,8 @@ def main():
     ]
 
     # class weights (handle class imbalance like Celeb-DF)
-    n_real = int(np.sum(y_train == 0))
-    n_fake = int(np.sum(y_train == 1))
+    n_real = int(np.sum(y_fit == 0))
+    n_fake = int(np.sum(y_fit == 1))
     total  = n_real + n_fake
     class_weight = {0: total / (2 * n_real), 1: total / (2 * n_fake)}
     print(f"\nClass weights: real={class_weight[0]:.3f}, fake={class_weight[1]:.3f}")
@@ -203,10 +210,10 @@ def main():
     # train
     print("\nTraining …")
     history = model.fit(
-        X_train, y_train,
+        X_fit, y_fit,
         epochs          = args.epochs,
         batch_size      = args.batch,
-        validation_split= args.val_split,
+        validation_data = (X_val, y_val),
         class_weight    = class_weight,
         callbacks       = callbacks,
         verbose         = 1

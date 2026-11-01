@@ -7,11 +7,13 @@ import time
 import uuid
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from core.video_predictor import (
+from backend.core.video_predictor import (
     FrameBuffer, N_SUBREGIONS, OMEGA, FS,
     build_ppg_map, classify_prob, signal_quality,
 )
@@ -22,42 +24,148 @@ router = APIRouter()
 MAX_UPLOAD_MB     = 50
 MAX_VIDEO_WORKERS = 4
 JOB_TTL_SECONDS   = 7200
+MAX_SESSIONS      = 200   # cap on per-session REST frame buffers
+SESSION_TTL_SEC   = 600   # drop a REST session buffer after 10 min of silence
 
-video_executor = ThreadPoolExecutor(
-    max_workers=MAX_VIDEO_WORKERS,
-    thread_name_prefix="deeptrack-video",
-)
+_video_executor: Optional[ThreadPoolExecutor] = None
+
+
+def get_video_executor() -> ThreadPoolExecutor:
+    """Created on first use so it can be shut down on app shutdown and recreated on the next start."""
+    global _video_executor
+    if _video_executor is None:
+        _video_executor = ThreadPoolExecutor(
+            max_workers=MAX_VIDEO_WORKERS,
+            thread_name_prefix="deeptrack-video",
+        )
+    return _video_executor
+
+
+def shutdown_video_executor():
+    global _video_executor
+    if _video_executor is not None:
+        _video_executor.shutdown(wait=False)
+        _video_executor = None
 
 
 class FrameRequest(BaseModel):
-    image: str  # base64-encoded JPEG
+    image: str                         # base64-encoded JPEG
+    session_id: Optional[str] = None   # optional: keeps this client's frames in their own buffer
+
+
+class ResetRequest(BaseModel):
+    session_id: Optional[str] = None
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _decode_frame(b64: str) -> np.ndarray:
+    """Decode a base64 JPEG/PNG (optionally a data: URL) into a BGR frame."""
+    b64 = b64.strip()
+    if b64.startswith("data:") and "," in b64:
+        b64 = b64.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(b64)
+    except Exception:
+        raise ValueError("Invalid base64 data")
+    frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("Could not decode image")
+    return frame
+
+
+def _process_frame(predictor, buffer: FrameBuffer, frame: np.ndarray) -> dict:
+    """
+    Push one frame into `buffer` and, once a full window is ready, classify it.
+    Shared by the REST and WebSocket endpoints so both apply the same signal
+    quality gate and probability smoothing. Blocking: run it in a worker thread.
+    """
+    rgb_vals = predictor.extract_frame_rgb(frame)
+    with buffer.lock:
+        buffer.push(rgb_vals)
+
+        if not buffer.ready():
+            return {"status": "buffering", "fill_pct": buffer.fill_pct,
+                    "frames_seen": buffer.frame_count,
+                    "message": f"Buffering... {buffer.fill_pct}% — need {OMEGA} frames (~{OMEGA//FS}s)"}
+
+        ppg_map = buffer.get_map()
+        q_ok, q_reason, snr = signal_quality(
+            [list(buffer.R[i]) for i in range(N_SUBREGIONS)],
+            [list(buffer.G[i]) for i in range(N_SUBREGIONS)],
+            [list(buffer.B[i]) for i in range(N_SUBREGIONS)],
+        )
+        frames_seen = buffer.frame_count
+
+    result = predictor.predict_map(ppg_map, q_ok, q_reason, snr)
+
+    with buffer.lock:
+        if result["fake_prob"] is not None:
+            buffer.prob_history.append(result["fake_prob"])
+        smoothed = float(np.mean(buffer.prob_history)) if buffer.prob_history else None
+        if smoothed is not None and result["label"] != "UNCERTAIN":
+            label, conf          = classify_prob(smoothed)
+            result["label"]      = label
+            result["confidence"] = conf
+            result["fake_prob"]  = round(smoothed, 4)
+        buffer.last_result = result
+        segments_seen = len(buffer.prob_history)
+
+    return {
+        "status": "prediction", "label": result["label"],
+        "confidence": result["confidence"], "fake_prob": result["fake_prob"],
+        "warning": result.get("warning"), "frames_seen": frames_seen,
+        "segments_seen": segments_seen,
+    }
+
+
+def _get_session_buffer(app, session_id: Optional[str]) -> FrameBuffer:
+    """The default buffer serves clients that send no session_id (old behaviour)."""
+    if not session_id:
+        return app.state.video_buffer
+    sessions = app.state.frame_buffers
+    now = time.time()
+    for sid in [s for s, (_, seen) in sessions.items() if now - seen > SESSION_TTL_SEC]:
+        del sessions[sid]
+    entry = sessions.get(session_id)
+    if entry is None:
+        if len(sessions) >= MAX_SESSIONS:
+            oldest = min(sessions, key=lambda s: sessions[s][1])
+            del sessions[oldest]
+        entry = (FrameBuffer(), now)
+    sessions[session_id] = (entry[0], now)
+    return entry[0]
 
 
 def _purge_old_jobs(jobs: dict):
     cutoff = time.time() - JOB_TTL_SECONDS
-    stale  = [jid for jid, j in jobs.items() if j["created_at"] < cutoff]
+    stale  = [jid for jid, j in list(jobs.items()) if j["created_at"] < cutoff]
     for jid in stale:
-        del jobs[jid]
+        jobs.pop(jid, None)
     if stale:
         logger.info(f"Purged {len(stale)} stale jobs")
 
 
 def _run_video_job(job_id: str, tmp_path: str, predictor, jobs: dict):
+    # Keep our own reference so the job can still finish if it was purged meanwhile.
+    job = jobs.get(job_id) or {}
     try:
-        jobs[job_id]["status"] = "processing"
+        job["status"] = "processing"
         result = predictor.predict_video(tmp_path)
-        jobs[job_id].update({"status": "done", "result": result})
+        job.update({"status": "done", "result": result})
         logger.info(f"Job {job_id} done: {result['label']} ({result['confidence']}%)")
     except ValueError as e:
-        jobs[job_id].update({"status": "error", "error": str(e)})
+        job.update({"status": "error", "error": str(e)})
         logger.warning(f"Job {job_id} validation error: {e}")
     except Exception as e:
-        jobs[job_id].update({"status": "error", "error": f"Processing error: {e}"})
-        logger.error(f"Job {job_id} failed: {e}")
+        job.update({"status": "error", "error": f"Processing error: {e}"})
+        logger.exception(f"Job {job_id} failed")
     finally:
         for _ in range(5):
             try:
                 os.unlink(tmp_path)
+                break
+            except FileNotFoundError:
                 break
             except PermissionError:
                 time.sleep(0.2)
@@ -68,32 +176,18 @@ def _run_video_job(job_id: str, tmp_path: str, predictor, jobs: dict):
 @router.post("/predict/frame")
 async def predict_frame(req: FrameRequest, request: Request):
     predictor = request.app.state.video_predictor
-    buffer    = request.app.state.video_buffer
     if predictor is None:
         raise HTTPException(503, "Video model not loaded.")
     try:
-        img_bytes = base64.b64decode(req.image)
-        arr       = np.frombuffer(img_bytes, dtype=np.uint8)
-        frame     = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if frame is None:
-            raise HTTPException(400, "Could not decode image")
-    except Exception as e:
-        raise HTTPException(400, f"Bad image data: {e}")
+        frame = _decode_frame(req.image)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
-    rgb_vals = predictor.extract_frame_rgb(frame)
-    buffer.push(rgb_vals)
-
-    if buffer.ready():
-        ppg_map = buffer.get_map()
-        result  = predictor.predict_map(ppg_map)
-        buffer.last_result = result
-        return {"status": "prediction", "label": result["label"],
-                "confidence": result["confidence"], "fake_prob": result["fake_prob"],
-                "frames_seen": buffer.frame_count}
-
-    return {"status": "buffering", "fill_pct": buffer.fill_pct,
-            "frames_seen": buffer.frame_count,
-            "message": f"Buffering... {buffer.fill_pct}% — need {OMEGA} frames (~{OMEGA//FS}s)"}
+    buffer = _get_session_buffer(request.app, req.session_id)
+    out = await run_in_threadpool(_process_frame, predictor, buffer, frame)
+    if out["status"] == "prediction":
+        out.pop("segments_seen", None)   # keep the REST response shape unchanged
+    return out
 
 
 @router.post("/predict/video")
@@ -103,19 +197,34 @@ async def predict_video(request: Request, file: UploadFile = File(...)):
     if predictor is None:
         raise HTTPException(503, "Video model not loaded.")
 
-    allowed = {".mp4", ".avi", ".mov", ".mkv"}
+    allowed = (".avi", ".mkv", ".mov", ".mp4")
     ext     = os.path.splitext(file.filename or "")[1].lower()
     if ext not in allowed:
         raise HTTPException(400, f"Unsupported format '{ext}'. Use: {', '.join(allowed)}")
 
-    data = await file.read()
-    mb   = len(data) / 1024 / 1024
-    if mb > MAX_UPLOAD_MB:
-        raise HTTPException(413, f"File too large ({mb:.1f}MB). Max is {MAX_UPLOAD_MB}MB.")
-
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-        tmp.write(data)
-        tmp_path = tmp.name
+    # Stream to disk and stop as soon as the limit is crossed, instead of
+    # loading the whole upload into memory first.
+    limit_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    size        = 0
+    tmp         = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+    tmp_path    = tmp.name
+    try:
+        with tmp:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit_bytes:
+                    raise HTTPException(413, f"File too large (over {MAX_UPLOAD_MB}MB). Max is {MAX_UPLOAD_MB}MB.")
+                tmp.write(chunk)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    mb = size / 1024 / 1024
 
     _purge_old_jobs(jobs)
     job_id = str(uuid.uuid4())
@@ -124,7 +233,7 @@ async def predict_video(request: Request, file: UploadFile = File(...)):
         "size_mb": round(mb, 2), "created_at": time.time(),
         "result": None, "error": None,
     }
-    video_executor.submit(_run_video_job, job_id, tmp_path, predictor, jobs)
+    get_video_executor().submit(_run_video_job, job_id, tmp_path, predictor, jobs)
     logger.info(f"Job {job_id} queued: {file.filename} ({mb:.1f}MB)")
 
     return {"job_id": job_id, "status": "queued", "filename": file.filename,
@@ -144,21 +253,28 @@ async def get_job(job_id: str, request: Request):
 
 @router.get("/jobs")
 async def list_jobs(request: Request):
-    jobs = request.app.state.jobs
+    jobs = list(request.app.state.jobs.items())
     summary = {
         jid: {"status": j["status"], "filename": j["filename"],
               "age_sec": round(time.time() - j["created_at"])}
-        for jid, j in jobs.items()
+        for jid, j in jobs
     }
     counts = {}
-    for j in jobs.values():
+    for _, j in jobs:
         counts[j["status"]] = counts.get(j["status"], 0) + 1
     return {"jobs": summary, "counts": counts, "total": len(jobs)}
 
 
 @router.post("/reset")
-async def reset(request: Request):
-    request.app.state.video_buffer.reset()
+async def reset(request: Request, req: Optional[ResetRequest] = None):
+    """Clear a frame buffer. With no body this resets the default buffer, as before."""
+    buffer = request.app.state.video_buffer
+    sid    = req.session_id if req else None
+    if sid:
+        buffer = request.app.state.frame_buffers.pop(sid, (None, 0))[0]
+    if buffer is not None:
+        with buffer.lock:
+            buffer.reset()
     return {"status": "reset"}
 
 
@@ -166,53 +282,31 @@ async def reset(request: Request):
 async def websocket_predict(ws: WebSocket):
     await ws.accept()
     predictor = ws.app.state.video_predictor
+    if predictor is None:
+        # Models are loaded in the background after startup; don't crash if a
+        # client connects before they are ready.
+        await ws.send_json({"error": "Video model not loaded yet — try again shortly."})
+        await ws.close(code=1013)
+        return
+
     ws_buffer = FrameBuffer()
     logger.info("WebSocket client connected")
     try:
         while True:
             data = await ws.receive_text()
             try:
-                img_bytes = base64.b64decode(data)
-                arr       = np.frombuffer(img_bytes, dtype=np.uint8)
-                frame     = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if frame is None:
-                    await ws.send_json({"error": "Could not decode frame"})
-                    continue
-            except Exception as e:
+                frame = _decode_frame(data)
+            except ValueError as e:
                 await ws.send_json({"error": str(e)})
                 continue
 
-            rgb_vals = predictor.extract_frame_rgb(frame)
-            ws_buffer.push(rgb_vals)
-
-            if ws_buffer.ready():
-                ppg_map = ws_buffer.get_map()
-                q_ok, q_reason, snr = signal_quality(
-                    [list(ws_buffer.R[i]) for i in range(N_SUBREGIONS)],
-                    [list(ws_buffer.G[i]) for i in range(N_SUBREGIONS)],
-                    [list(ws_buffer.B[i]) for i in range(N_SUBREGIONS)],
-                )
-                result = predictor.predict_map(ppg_map, q_ok, q_reason, snr)
-                if result["fake_prob"] is not None:
-                    ws_buffer.prob_history.append(result["fake_prob"])
-                smoothed = float(np.mean(ws_buffer.prob_history)) if ws_buffer.prob_history else None
-                if smoothed is not None and result["label"] != "UNCERTAIN":
-                    label, conf          = classify_prob(smoothed)
-                    result["label"]      = label
-                    result["confidence"] = conf
-                    result["fake_prob"]  = round(smoothed, 4)
-                ws_buffer.last_result = result
-                await ws.send_json({
-                    "status": "prediction", "label": result["label"],
-                    "confidence": result["confidence"], "fake_prob": result["fake_prob"],
-                    "warning": result.get("warning"), "frames_seen": ws_buffer.frame_count,
-                    "segments_seen": len(ws_buffer.prob_history),
-                })
-            else:
-                await ws.send_json({
-                    "status": "buffering", "fill_pct": ws_buffer.fill_pct,
-                    "frames_seen": ws_buffer.frame_count,
-                })
+            try:
+                msg = await run_in_threadpool(_process_frame, predictor, ws_buffer, frame)
+            except Exception:
+                logger.exception("WebSocket frame processing failed")
+                await ws.send_json({"error": "Frame processing failed."})
+                continue
+            await ws.send_json(msg)
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
 

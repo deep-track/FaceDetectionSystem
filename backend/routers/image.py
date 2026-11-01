@@ -1,11 +1,15 @@
 import io
 import logging
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
-from PIL import Image
+from PIL import Image, ImageOps
 
 logger = logging.getLogger("deeptrack.image")
 router = APIRouter()
+
+MAX_IMAGE_MB = 10
+
 
 @router.post("/predict")
 async def predict_image(request: Request, file: UploadFile = File(...)):
@@ -13,13 +17,27 @@ async def predict_image(request: Request, file: UploadFile = File(...)):
     predictor = request.app.state.image_predictor
     if predictor is None:
         raise HTTPException(503, "Image model not loaded.")
+
+    # Read at most one byte past the limit so an oversized upload is rejected
+    # without pulling all of it into memory.
+    limit_bytes = MAX_IMAGE_MB * 1024 * 1024
+    image_bytes = await file.read(limit_bytes + 1)
+    if len(image_bytes) > limit_bytes:
+        raise HTTPException(413, f"Image too large (over {MAX_IMAGE_MB}MB). Max is {MAX_IMAGE_MB}MB.")
+
     try:
-        image_bytes = await file.read()
-        image       = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        result      = predictor.predict(image)
-        return {"filename": file.filename, **result}
+        image = Image.open(io.BytesIO(image_bytes))
+        # Phone photos store rotation in EXIF; without this the model sees them sideways.
+        image = ImageOps.exif_transpose(image).convert("RGB")
     except Exception as e:
         raise HTTPException(400, f"Error processing image: {e}")
+
+    try:
+        result = await run_in_threadpool(predictor.predict, image)
+    except Exception:
+        logger.exception("Image prediction failed")
+        raise HTTPException(500, "Prediction failed.")
+    return {"filename": file.filename, **result}
 
 
 @router.get("/", response_class=HTMLResponse)
