@@ -1,6 +1,7 @@
 import os
 import cv2
 import logging
+import threading
 import numpy as np
 import mediapipe as mp
 from collections import deque
@@ -8,11 +9,9 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from scipy.signal import butter, filtfilt, welch
 
-logger = logging.getLogger("deeptrack.video")
+from backend.core.model_files import resolve_model_file, LANDMARKER_URL
 
-CNN_MODEL_PATH  = "data/cnn_model.keras"
-LANDMARKER_PATH = "data/face_landmarker.task"
-HF_REPO_ID      = "dkkinyua/fakecatcher"
+logger = logging.getLogger("deeptrack.video")
 
 OMEGA               = 128
 N_SUBREGIONS        = 32
@@ -30,21 +29,6 @@ MID_FACE_32 = [
     351, 399, 175, 152, 377, 400,
     378, 379, 365, 397,
 ]
-
-
-def _resolve_path(local_path: str, hf_filename: str) -> str:
-    if os.path.exists(local_path):
-        logger.info(f"Using local file: {local_path}")
-        return local_path
-    logger.info(f"{local_path} not found — downloading {hf_filename} from HuggingFace...")
-    from huggingface_hub import hf_hub_download
-    path = hf_hub_download(
-        repo_id=HF_REPO_ID,
-        filename=hf_filename,
-        token=os.getenv("HUGGINGFACE_TOKEN"),
-    )
-    logger.info(f"Downloaded: {path}")
-    return path
 
 
 # ── Signal helpers ────────────────────────────────────────────────────────────
@@ -138,6 +122,9 @@ class FrameBuffer:
         self.last_result  = None
         self.step         = OMEGA // 2
         self.prob_history = deque(maxlen=SMOOTHING_WINDOW)
+        # Held by callers that touch the buffer from worker threads, so two
+        # concurrent requests on the same buffer cannot interleave pushes.
+        self.lock         = threading.Lock()
 
     def push(self, rgb_values: list):
         for i, (r, g, b) in enumerate(rgb_values):
@@ -170,8 +157,8 @@ class FrameBuffer:
 
 class VideoPredictor:
     def __init__(self):
-        cnn_path        = _resolve_path(CNN_MODEL_PATH,  "cnn_model.keras")
-        landmarker_path = _resolve_path(LANDMARKER_PATH, "face_landmarker.task")
+        cnn_path        = resolve_model_file("cnn_model.keras")
+        landmarker_path = resolve_model_file("face_landmarker.task", LANDMARKER_URL)
 
         logger.info("Loading CNN model...")
         import tensorflow as tf
@@ -189,6 +176,9 @@ class VideoPredictor:
             min_face_presence_confidence=0.4,
         )
         self.landmarker      = mp_vision.FaceLandmarker.create_from_options(image_opts)
+        # The IMAGE-mode landmarker is shared by every webcam/WebSocket client and
+        # is not guaranteed to be thread-safe, so calls to it are serialised.
+        self._landmarker_lock = threading.Lock()
         self.lm_indices      = MID_FACE_32[:N_SUBREGIONS]
         self.landmarker_path = landmarker_path
         logger.info("FaceLandmarker loaded.")
@@ -197,7 +187,8 @@ class VideoPredictor:
         h, w      = frame_bgr.shape[:2]
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-        result    = self.landmarker.detect(mp_image)
+        with self._landmarker_lock:
+            result = self.landmarker.detect(mp_image)
         if not result.face_landmarks:
             return [(0.0, 0.0, 0.0)] * N_SUBREGIONS
         landmarks = result.face_landmarks[0]
@@ -312,8 +303,11 @@ class VideoPredictor:
             probs.append(prob)
             segments.append({
                 "segment":    idx + 1,
-                "start_sec":  round(start / FS, 1),
-                "end_sec":    round(end   / FS, 1),
+                # Display times use the video's real frame rate. The signal
+                # processing itself stays at FS=30 because that is what the CNN
+                # was trained with.
+                "start_sec":  round(start / video_fps, 1),
+                "end_sec":    round(end   / video_fps, 1),
                 "label":      label,
                 "confidence": conf,
                 "fake_prob":  prob,
