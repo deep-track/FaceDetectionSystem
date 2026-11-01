@@ -65,7 +65,7 @@ Lightweight liveness check. Reports operational status of both models independen
 }
 ```
 
-`video_model` or `image_model` will be `"unavailable"` if the respective model failed to load at startup. Use this endpoint for load-balancer health probes.
+Each model reports `"loading"` while it starts in the background, `"operational"` once ready, and `"unavailable"` if it failed to load at startup (the error is in the server log). Use this endpoint for load-balancer health probes.
 
 ### `GET /v1/status`
 
@@ -105,9 +105,12 @@ Submit one JPEG frame at a time. Predictions are emitted after every 128-frame b
 **Request body**
 ```json
 {
-  "image": "<base64-encoded JPEG>"
+  "image": "<base64-encoded JPEG>",
+  "session_id": "optional-client-id"
 }
 ```
+
+`session_id` is optional. Frames sent with the same `session_id` share their own buffer, so several clients can use this endpoint at once. If it is omitted, the request uses the single shared default buffer (the previous behaviour). Session buffers are discarded after 10 minutes without frames, and at most 200 are kept. A `data:image/jpeg;base64,...` URL is accepted as well as a bare Base64 string.
 
 **Response — buffering** (`< 128 frames`)
 ```json
@@ -126,9 +129,12 @@ Submit one JPEG frame at a time. Predictions are emitted after every 128-frame b
   "label": "REAL",
   "confidence": 92.3,
   "fake_prob": 0.0765,
+  "warning": null,
   "frames_seen": 128
 }
 ```
+
+If the signal quality is too low (for example the face was not detected in enough frames), the same response comes back with `"label": "UNCERTAIN"`, `"fake_prob": null` and the reason in `warning`. As on the WebSocket, predictions are smoothed across the last 3 windows of the session.
 
 > `fake_prob` is a float in `[0, 1]`. `confidence` is derived from the distance to the 0.5 decision boundary, expressed as a percentage.
 
@@ -238,13 +244,20 @@ List all active (non-expired) jobs.
 
 #### `POST /v1/video/reset`
 
-Clears the shared frame buffer. Use when switching video sources mid-session.
+Clears a frame buffer. Use when switching video sources mid-session.
+
+**Request body** (optional)
+```json
+{ "session_id": "optional-client-id" }
+```
+
+With no body, the shared default buffer is cleared; with a `session_id`, only that session's buffer is removed.
 
 ```json
 { "status": "reset" }
 ```
 
-> **Warning:** This affects all concurrent callers sharing the same buffer. Not safe for multi-tenant deployments without per-client buffer isolation. The WebSocket endpoint (`/v1/video/ws`) uses per-connection buffers and is unaffected.
+> **Warning:** Resetting the default buffer affects every caller that sends no `session_id`. Send a `session_id` on `/predict/frame` and `/reset` for multi-client use. The WebSocket endpoint (`/v1/video/ws`) uses per-connection buffers and is unaffected.
 
 ### WebSocket Streaming
 
@@ -252,7 +265,9 @@ Clears the shared frame buffer. Use when switching video sources mid-session.
 
 Stream JPEG frames for continuous real-time predictions. Each WebSocket connection maintains its own isolated frame buffer — independent of the REST frame endpoint and other connections.
 
-**Send** — raw Base64-encoded JPEG string (one frame per message)
+**Send** — raw Base64-encoded JPEG string (one frame per message). A `data:` URL is also accepted.
+
+If the video model has not finished loading when you connect, the server sends `{"error": "Video model not loaded yet — try again shortly."}` and closes the connection with code `1013`. Reconnect after a moment (see `/v1/health`).
 
 **Receive — buffering**
 ```json
@@ -304,7 +319,7 @@ Classify a single image as Real or Fake using the Swin Transformer model.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `file` | binary | Accepted: JPEG, PNG, WEBP, BMP |
+| `file` | binary | Accepted: JPEG, PNG, WEBP, BMP; max 10 MB. EXIF rotation is applied before analysis. |
 
 **Response**
 ```json
@@ -315,7 +330,9 @@ Classify a single image as Real or Fake using the Swin Transformer model.
   "raw_scores": {
     "Real": 5.73,
     "Fake": 94.27
-  }
+  },
+  "decision_threshold": 0.5,
+  "face_detected": true
 }
 ```
 
@@ -325,9 +342,11 @@ Classify a single image as Real or Fake using the Swin Transformer model.
 |-------|------|-------------|
 | `filename` | string | Original uploaded filename |
 | `prediction` | string | `Real` or `Fake` |
-| `confidence_percentage` | float | Confidence of the winning class (0–100) |
+| `confidence_percentage` | float | How far the score is past the decision threshold, from 50 (right at the cut-off) to 100 (certain). With a threshold of 0.5 this equals the winning class's probability |
 | `raw_scores.Real` | float | Softmax probability for Real class (0–100) |
 | `raw_scores.Fake` | float | Softmax probability for Fake class (0–100) |
+| `decision_threshold` | float | The `Fake` probability (0–1) at or above which the image is called `Fake`. Chosen on the validation set during training (or reset later with `training/evaluate_swin.py`) and stored in `best_swin.pth`; 0.5 for older model files. The `IMAGE_THRESHOLD` environment variable overrides it |
+| `face_detected` | bool or null | `true` if a face was found and cropped before classification. `false` means no face was found and the whole image was classified (treat the result with caution). `null` when face cropping is turned off (`FACE_CROP=0`) |
 
 > `raw_scores` always sum to 100. `confidence_percentage` equals the higher of the two scores.
 
@@ -375,14 +394,14 @@ All errors follow standard HTTP status codes with a `detail` field.
 |------|---------|-----------------|
 | `400` | Bad request | Malformed Base64, unsupported file format |
 | `404` | Not found | Unknown or expired `job_id` |
-| `413` | Payload too large | Video exceeds 50 MB |
-| `500` | Internal server error | Model inference failure |
+| `413` | Payload too large | Video exceeds 50 MB, or image exceeds 10 MB |
+| `500` | Internal server error | Model inference failure (image endpoint) |
 | `503` | Service unavailable | Model not loaded at startup |
 
 **Example**
 ```json
 {
-  "detail": "Unsupported format '.wmv'. Use: .mp4, .avi, .mov, .mkv"
+  "detail": "Unsupported format '.wmv'. Use: .avi, .mkv, .mov, .mp4"
 }
 ```
 

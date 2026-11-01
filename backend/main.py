@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -19,27 +20,35 @@ async def _load_models(app: FastAPI):
     move all heavy imports such as tensorflow, mediapipe
     to this function so easier port binding in prod
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     logger.info("=== DeepTrack model loading (background) ===")
 
     try:
-        from core.video_predictor import VideoPredictor, FrameBuffer
+        from backend.core.video_predictor import VideoPredictor, FrameBuffer
         vp = await loop.run_in_executor(None, VideoPredictor)
         app.state.video_predictor = vp
         app.state.video_buffer    = FrameBuffer()
         logger.info("Video predictor ready.")
+    except FileNotFoundError as e:       # a model file is missing: expected, no traceback needed
+        app.state.model_errors["video"] = str(e)
+        logger.error(f"Video predictor unavailable: {e}")
     except Exception as e:
-        logger.error(f"Video predictor failed to load: {e}")
+        app.state.model_errors["video"] = str(e)
+        logger.exception("Video predictor failed to load")
 
     try:
-        from core.image_predictor import ImagePredictor
+        from backend.core.image_predictor import ImagePredictor
         ip = await loop.run_in_executor(None, ImagePredictor)
         app.state.image_predictor = ip
         logger.info("Image predictor ready.")
+    except FileNotFoundError as e:       # e.g. best_swin.pth has not been trained yet
+        app.state.model_errors["image"] = str(e)
+        logger.error(f"Image predictor unavailable: {e}")
     except Exception as e:
-        logger.error(f"Image predictor failed to load: {e}")
+        app.state.model_errors["image"] = str(e)
+        logger.exception("Image predictor failed to load")
 
-    logger.info("=== All models loaded ===")
+    logger.info("=== Model loading finished ===")
 
 
 @asynccontextmanager
@@ -51,6 +60,8 @@ async def lifespan(app: FastAPI):
     app.state.video_buffer    = None
     app.state.image_predictor = None
     app.state.jobs            = {}
+    app.state.frame_buffers   = {}   # per-session buffers for POST /predict/frame
+    app.state.model_errors    = {}   # "video"/"image" -> load error message
 
     asyncio.create_task(_load_models(app))
     logger.info("=== DeepTrack server started — models loading in background ===")
@@ -60,11 +71,9 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     if app.state.video_predictor:
         app.state.video_predictor.close()
-    try:
-        from routers.video import video_executor
-        video_executor.shutdown(wait=False)
-    except Exception:
-        pass
+    if app.state.image_predictor:
+        app.state.image_predictor.close()
+    video.shutdown_video_executor()
 
 
 app = FastAPI(
@@ -78,18 +87,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Comma-separated list, e.g. ALLOWED_ORIGINS="http://localhost:5173,https://app.example.com".
+# Defaults to "*" (open) so existing deployments keep working; set it in production.
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()
+] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # moved these imports here for same binding issue
-from routers import video, image
+from backend.routers import video, image
 app.include_router(video.router, prefix="/v1/video", tags=["Video"])
 app.include_router(image.router, prefix="/v1/image", tags=["Image"])
+
+
+def _model_state(name: str, predictor) -> str:
+    if predictor is not None:
+        return "operational"
+    return "unavailable" if name in app.state.model_errors else "loading"
 
 
 @app.get("/v1/health", tags=["System"])
@@ -97,17 +118,16 @@ async def health():
     return {
         "status":         "ok",
         "uptime_seconds": round(time.time() - _startup_time),
-        "video_model":    "operational" if app.state.video_predictor else "loading",
-        "image_model":    "operational" if app.state.image_predictor else "loading",
+        "video_model":    _model_state("video", app.state.video_predictor),
+        "image_model":    _model_state("image", app.state.image_predictor),
     }
 
 
 @app.get("/v1/status", tags=["System"])
 async def status():
-    try:
-        from routers.video import MAX_VIDEO_WORKERS, MAX_UPLOAD_MB, JOB_TTL_SECONDS
-    except Exception:
-        MAX_VIDEO_WORKERS = MAX_UPLOAD_MB = JOB_TTL_SECONDS = None
+    MAX_VIDEO_WORKERS = video.MAX_VIDEO_WORKERS
+    MAX_UPLOAD_MB     = video.MAX_UPLOAD_MB
+    JOB_TTL_SECONDS   = video.JOB_TTL_SECONDS
 
     jobs   = app.state.jobs or {}
     counts = {}
