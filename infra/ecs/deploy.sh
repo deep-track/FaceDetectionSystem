@@ -92,7 +92,10 @@ aws ecs describe-clusters --clusters $NAME --query 'clusters[?status==`ACTIVE`].
   || aws ecs create-cluster --cluster-name $NAME >/dev/null
 say "Cluster $NAME"
 
-python3 - "$IMAGE" "$SECRET_ARN" "$ROLE_ARN" > /tmp/$NAME-taskdef.json <<'EOF'
+TASKDEF_FILE=$(mktemp)
+# Git Bash on Windows: the AWS CLI needs a Windows path.
+TASKDEF_URI=file://$(command -v cygpath >/dev/null && cygpath -m "$TASKDEF_FILE" || echo "$TASKDEF_FILE")
+${PYTHON:-python3} - "$IMAGE" "$SECRET_ARN" "$ROLE_ARN" > "$TASKDEF_FILE" <<'EOF'
 import json, sys
 image, secret, role = sys.argv[1:4]
 print(json.dumps({
@@ -115,7 +118,8 @@ print(json.dumps({
   }],
 }))
 EOF
-TASKDEF=$(aws ecs register-task-definition --cli-input-json file:///tmp/$NAME-taskdef.json --query taskDefinition.taskDefinitionArn --output text)
+TASKDEF=$(aws ecs register-task-definition --cli-input-json "$TASKDEF_URI" --query taskDefinition.taskDefinitionArn --output text)
+rm -f "$TASKDEF_FILE"
 say "Task definition $TASKDEF"
 
 ALB=$(alb_arn)
