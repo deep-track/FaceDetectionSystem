@@ -1,0 +1,17 @@
+# What the API server needs to run (Docker / AWS), Linux, Python 3.12, CPU.
+# requirements.txt is a full development environment (training, notebooks,
+# pre-release TensorFlow); this file is only the runtime.
+# The image model's packages are in requirements-image.txt (optional).
+fastapi==0.146.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+pydantic==2.14.1
+# data/cnn_model.keras was saved with Keras 3.13.2.
+tensorflow-cpu==2.20.0
+keras==3.13.2
+# mediapipe brings opencv-contrib-python (cv2).
+mediapipe==1.2.0
+numpy
+scipy
+pillow
+huggingface_hub

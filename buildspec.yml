@@ -1,0 +1,16 @@
+# AWS CodeBuild (project deeptrack-api, us-east-1): builds the Docker image
+# and pushes it to ECR as deeptrack-api:<short commit>. Needs privileged mode.
+version: 0.2
+
+env:
+  variables:
+    REPO: 097659826060.dkr.ecr.us-east-1.amazonaws.com/deeptrack-api
+
+phases:
+  build:
+    commands:
+      - TAG=$(echo "$CODEBUILD_RESOLVED_SOURCE_VERSION" | cut -c1-7)
+      - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${REPO%%/*}"
+      - docker build -t "$REPO:$TAG" .
+      - docker push "$REPO:$TAG"
+      - echo "Pushed $REPO:$TAG"

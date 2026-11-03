@@ -1,10 +1,12 @@
 import asyncio
+import hmac
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +88,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# API keys: comma-separated in DEEPTRACK_API_KEYS. When set, every /v1/ call
+# except the health check needs a matching X-API-Key header. When unset (local
+# development) the API stays open, with a warning at startup.
+API_KEYS = [k.strip() for k in os.getenv("DEEPTRACK_API_KEYS", "").split(",") if k.strip()]
+OPEN_PATHS = {"/v1/health"}
+if not API_KEYS:
+    logger.warning("DEEPTRACK_API_KEYS is not set — the API accepts calls without a key.")
+
+
+def _key_matches(provided: str) -> bool:
+    return any(hmac.compare_digest(provided.encode(), key.encode()) for key in API_KEYS)
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    path = request.url.path
+    if API_KEYS and path.startswith("/v1/") and path not in OPEN_PATHS and request.method != "OPTIONS":
+        if not _key_matches(request.headers.get("x-api-key", "")):
+            return JSONResponse({"detail": "Missing or invalid X-API-Key."}, status_code=401)
+    return await call_next(request)
+
+
 # moved these imports here for same binding issue
 from routers import video, image
 app.include_router(video.router, prefix="/v1/video", tags=["Video"])
@@ -100,6 +124,12 @@ async def health():
         "video_model":    "operational" if app.state.video_predictor else "loading",
         "image_model":    "operational" if app.state.image_predictor else "loading",
     }
+
+
+# Lets a client check that its key works (Sentinel's health page calls this).
+@app.get("/v1/client/usage/me", tags=["System"])
+async def usage_me():
+    return {"status": "ok", "authenticated": bool(API_KEYS)}
 
 
 @app.get("/v1/status", tags=["System"])
