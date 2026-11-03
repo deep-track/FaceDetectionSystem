@@ -22,8 +22,8 @@ REPO=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/$NAME
 SECRET_ID=deeptrack-api/api-keys
 export AWS_DEFAULT_REGION=$REGION
 # Git Bash on Windows: aws.exe ends lines with CRLF, which would leave \r in
-# every captured value.
-if command -v cygpath >/dev/null; then aws() { command aws "$@" | tr -d '\r'; }; fi
+# every captured value, and MSYS would rewrite /ecs/... into a Windows path.
+if command -v cygpath >/dev/null; then export MSYS_NO_PATHCONV=1; aws() { command aws "$@" | tr -d '\r'; }; fi
 
 [ "$(aws sts get-caller-identity --query Account --output text)" = "$ACCOUNT" ] || { echo "Wrong AWS account"; exit 1; }
 
