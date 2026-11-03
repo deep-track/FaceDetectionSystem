@@ -10,11 +10,12 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# CPU builds of torch/torchvision first, so requirements.txt doesn't pull the
+# Runtime dependencies only (requirements.txt is the full development
+# environment). CPU builds of torch/torchvision, so pip doesn't pull the
 # multi-gigabyte CUDA wheels.
-COPY requirements.txt .
-RUN pip install --no-cache-dir torch==2.14.1 torchvision==0.29.1 --index-url https://download.pytorch.org/whl/cpu \
- && pip install --no-cache-dir -r requirements.txt
+COPY requirements-server.txt .
+RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
+      torch==2.14.1+cpu torchvision==0.29.1+cpu -r requirements-server.txt
 
 COPY backend ./backend
 # The video models ship in the repo (data/cnn_model.keras, data/face_landmarker.task).
