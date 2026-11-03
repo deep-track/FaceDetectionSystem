@@ -11,16 +11,18 @@ RUN apt-get update \
 WORKDIR /app
 
 # Runtime dependencies only (requirements.txt is the full development
-# environment). CPU builds of torch/torchvision, so pip doesn't pull the
-# multi-gigabyte CUDA wheels.
-COPY requirements-server.txt .
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
-      torch==2.14.1+cpu torchvision==0.29.1+cpu -r requirements-server.txt
+# environment). The image model (torch, a few GB) is left out unless
+# WITH_IMAGE_MODEL=1; without it the image endpoints report unavailable and
+# video works normally.
+ARG WITH_IMAGE_MODEL=0
+COPY requirements-server.txt requirements-image.txt ./
+RUN pip install --no-cache-dir -r requirements-server.txt \
+ && if [ "$WITH_IMAGE_MODEL" = "1" ]; then pip install --no-cache-dir -r requirements-image.txt; fi
 
 COPY backend ./backend
 # The video models ship in the repo (data/cnn_model.keras, data/face_landmarker.task).
-# The image model (best_swin.pth) comes from HuggingFace when HUGGINGFACE_TOKEN
-# is set; without it the image endpoints report unavailable.
+# The image model's weights (best_swin.pth) come from HuggingFace when
+# HUGGINGFACE_TOKEN is set (and the image was built with WITH_IMAGE_MODEL=1).
 COPY data ./data
 
 ENV PORT=8080 PYTHONUNBUFFERED=1
