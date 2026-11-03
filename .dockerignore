@@ -1,0 +1,10 @@
+.git
+.env
+myenv
+legacy
+training
+scripts
+**/__pycache__
+data/split
+data/ppg_maps.npz
+*.ipynb

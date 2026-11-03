@@ -1,6 +1,6 @@
 # DeepTrack API Reference
 
-**Version:** 1.0 | **Base URL:** `/` | **Protocol:** HTTP / WebSocket | **Auth:** None required
+**Version:** 1.0 | **Base URL:** `https://api.deeptrack.io` | **Protocol:** HTTP / WebSocket | **Auth:** `X-API-Key` header on every `/v1/` call except `/v1/health` (keys are set in `DEEPTRACK_API_KEYS`; when it's unset, e.g. locally, no key is needed). `GET /v1/client/usage/me` checks a key.
 
 DeepTrack is a unified deepfake detection API with two independent analysis engines:
 
